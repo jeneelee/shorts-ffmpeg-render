@@ -1,1 +1,50 @@
+name: Render Shorts Video
 
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Unique job id"
+        required: true
+        default: "test001"
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Create sample video
+        run: |
+          mkdir -p output
+
+          ffmpeg \
+            -loop 1 -t 3 -i sample/scene1.png \
+            -loop 1 -t 3 -i sample/scene2.png \
+            -loop 1 -t 3 -i sample/scene3.png \
+            -i sample/audio.mp3 \
+            -filter_complex "\
+            [0:v]scale=1080:1920,setsar=1[v0];\
+            [1:v]scale=1080:1920,setsar=1[v1];\
+            [2:v]scale=1080:1920,setsar=1[v2];\
+            [v0][v1][v2]concat=n=3:v=1:a=0[v]" \
+            -map "[v]" -map 3:a \
+            -shortest \
+            -r 30 \
+            -c:v libx264 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            output/short_${{ github.event.inputs.job_id }}.mp4
+
+      - name: Upload video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: output/*.mp4
