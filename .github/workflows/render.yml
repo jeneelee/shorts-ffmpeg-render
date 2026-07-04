@@ -4,54 +4,76 @@ on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: "Unique job id"
         required: true
-      scene1_url:
-        description: "Scene 1 image URL"
+      scene1_id:
         required: true
-      scene2_url:
-        description: "Scene 2 image URL"
+      scene2_id:
         required: true
-      scene3_url:
-        description: "Scene 3 image URL"
+      scene3_id:
         required: true
-      scene4_url:
-        description: "Scene 4 image URL"
+      scene4_id:
         required: true
-      scene5_url:
-        description: "Scene 5 image URL"
+      scene5_id:
         required: true
-      audio_url:
-        description: "Audio URL"
+      audio_id:
         required: false
+      output_folder_id:
+        required: true
 
 jobs:
   render:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install FFmpeg
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          pip install google-api-python-client google-auth
 
-      - name: Prepare folders
+      - name: Prepare files
         run: |
           mkdir -p input output
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT }}' > service-account.json
 
-      - name: Download images
+      - name: Download files from Google Drive
         run: |
-          curl -L "${{ github.event.inputs.scene1_url }}" -o input/scene1.png
-          curl -L "${{ github.event.inputs.scene2_url }}" -o input/scene2.png
-          curl -L "${{ github.event.inputs.scene3_url }}" -o input/scene3.png
-          curl -L "${{ github.event.inputs.scene4_url }}" -o input/scene4.png
-          curl -L "${{ github.event.inputs.scene5_url }}" -o input/scene5.png
+          python - <<'PY'
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
+          import io
 
-      - name: Download or create audio
+          SCOPES = ["https://www.googleapis.com/auth/drive"]
+          creds = service_account.Credentials.from_service_account_file(
+              "service-account.json", scopes=SCOPES
+          )
+          drive = build("drive", "v3", credentials=creds)
+
+          files = {
+              "input/scene1.png": "${{ github.event.inputs.scene1_id }}",
+              "input/scene2.png": "${{ github.event.inputs.scene2_id }}",
+              "input/scene3.png": "${{ github.event.inputs.scene3_id }}",
+              "input/scene4.png": "${{ github.event.inputs.scene4_id }}",
+              "input/scene5.png": "${{ github.event.inputs.scene5_id }}",
+          }
+
+          audio_id = "${{ github.event.inputs.audio_id }}"
+          if audio_id:
+              files["input/audio.mp3"] = audio_id
+
+          for path, file_id in files.items():
+              request = drive.files().get_media(fileId=file_id)
+              fh = io.FileIO(path, "wb")
+              downloader = MediaIoBaseDownload(fh, request)
+              done = False
+              while not done:
+                  status, done = downloader.next_chunk()
+          PY
+
+      - name: Create silent audio if missing
         run: |
-          if [ -n "${{ github.event.inputs.audio_url }}" ]; then
-            curl -L "${{ github.event.inputs.audio_url }}" -o input/audio.mp3
-          else
+          if [ ! -f input/audio.mp3 ]; then
             ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 15 -q:a 9 -acodec libmp3lame input/audio.mp3
           fi
 
@@ -79,8 +101,34 @@ jobs:
             -c:a aac \
             output/short_${{ github.event.inputs.job_id }}.mp4
 
-      - name: Upload video artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: short-video-${{ github.event.inputs.job_id }}
-          path: output/*.mp4
+      - name: Upload video to Google Drive
+        run: |
+          python - <<'PY'
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          SCOPES = ["https://www.googleapis.com/auth/drive"]
+          creds = service_account.Credentials.from_service_account_file(
+              "service-account.json", scopes=SCOPES
+          )
+          drive = build("drive", "v3", credentials=creds)
+
+          job_id = "${{ github.event.inputs.job_id }}"
+          folder_id = "${{ github.event.inputs.output_folder_id }}"
+          file_path = f"output/short_{job_id}.mp4"
+
+          metadata = {
+              "name": f"short_{job_id}.mp4",
+              "parents": [folder_id]
+          }
+
+          media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
+          uploaded = drive.files().create(
+              body=metadata,
+              media_body=media,
+              fields="id,name,webViewLink"
+          ).execute()
+
+          print("Uploaded:", uploaded)
+          PY
