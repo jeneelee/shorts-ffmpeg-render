@@ -6,36 +6,72 @@ on:
       job_id:
         description: "Unique job id"
         required: true
-        default: "test001"
+      scene1_url:
+        description: "Scene 1 image URL"
+        required: true
+      scene2_url:
+        description: "Scene 2 image URL"
+        required: true
+      scene3_url:
+        description: "Scene 3 image URL"
+        required: true
+      scene4_url:
+        description: "Scene 4 image URL"
+        required: true
+      scene5_url:
+        description: "Scene 5 image URL"
+        required: true
+      audio_url:
+        description: "Audio URL"
+        required: false
 
 jobs:
   render:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Create sample video
+      - name: Prepare folders
         run: |
-          mkdir -p output
+          mkdir -p input output
 
+      - name: Download images
+        run: |
+          curl -L "${{ github.event.inputs.scene1_url }}" -o input/scene1.png
+          curl -L "${{ github.event.inputs.scene2_url }}" -o input/scene2.png
+          curl -L "${{ github.event.inputs.scene3_url }}" -o input/scene3.png
+          curl -L "${{ github.event.inputs.scene4_url }}" -o input/scene4.png
+          curl -L "${{ github.event.inputs.scene5_url }}" -o input/scene5.png
+
+      - name: Download or create audio
+        run: |
+          if [ -n "${{ github.event.inputs.audio_url }}" ]; then
+            curl -L "${{ github.event.inputs.audio_url }}" -o input/audio.mp3
+          else
+            ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 15 -q:a 9 -acodec libmp3lame input/audio.mp3
+          fi
+
+      - name: Render video
+        run: |
           ffmpeg \
-            -loop 1 -t 3 -i sample/scene1.png \
-            -loop 1 -t 3 -i sample/scene2.png \
-            -loop 1 -t 3 -i sample/scene3.png \
-            -i sample/audio.mp3 \
+            -loop 1 -t 3 -i input/scene1.png \
+            -loop 1 -t 3 -i input/scene2.png \
+            -loop 1 -t 3 -i input/scene3.png \
+            -loop 1 -t 3 -i input/scene4.png \
+            -loop 1 -t 3 -i input/scene5.png \
+            -i input/audio.mp3 \
             -filter_complex "\
             [0:v]scale=1080:1920,setsar=1[v0];\
             [1:v]scale=1080:1920,setsar=1[v1];\
             [2:v]scale=1080:1920,setsar=1[v2];\
-            [v0][v1][v2]concat=n=3:v=1:a=0[v]" \
-            -map "[v]" -map 3:a \
+            [3:v]scale=1080:1920,setsar=1[v3];\
+            [4:v]scale=1080:1920,setsar=1[v4];\
+            [v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[v]" \
+            -map "[v]" -map 5:a \
             -shortest \
             -r 30 \
             -c:v libx264 \
@@ -46,5 +82,5 @@ jobs:
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rendered-video
+          name: short-video-${{ github.event.inputs.job_id }}
           path: output/*.mp4
