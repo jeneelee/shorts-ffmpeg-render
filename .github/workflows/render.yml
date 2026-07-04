@@ -5,15 +5,7 @@ on:
     inputs:
       job_id:
         required: true
-      scene1_id:
-        required: true
-      scene2_id:
-        required: true
-      scene3_id:
-        required: true
-      scene4_id:
-        required: true
-      scene5_id:
+      image_ids:
         required: true
       audio_id:
         required: false
@@ -31,18 +23,18 @@ jobs:
           sudo apt-get install -y ffmpeg
           pip install google-api-python-client google-auth
 
-      - name: Prepare files
+      - name: Prepare folders
         run: |
-          mkdir -p input output
+          mkdir -p input clips output
           echo '${{ secrets.GCP_SERVICE_ACCOUNT }}' > service-account.json
 
-      - name: Download files from Google Drive
+      - name: Download images and audio from Google Drive
         run: |
           python - <<'PY'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io
+          import io, os
 
           SCOPES = ["https://www.googleapis.com/auth/drive"]
           creds = service_account.Credentials.from_service_account_file(
@@ -50,52 +42,60 @@ jobs:
           )
           drive = build("drive", "v3", credentials=creds)
 
-          files = {
-              "input/scene1.png": "${{ github.event.inputs.scene1_id }}",
-              "input/scene2.png": "${{ github.event.inputs.scene2_id }}",
-              "input/scene3.png": "${{ github.event.inputs.scene3_id }}",
-              "input/scene4.png": "${{ github.event.inputs.scene4_id }}",
-              "input/scene5.png": "${{ github.event.inputs.scene5_id }}",
-          }
+          image_ids = "${{ github.event.inputs.image_ids }}".split(",")
+          image_ids = [x.strip() for x in image_ids if x.strip()]
 
-          audio_id = "${{ github.event.inputs.audio_id }}"
-          if audio_id:
-              files["input/audio.mp3"] = audio_id
-
-          for path, file_id in files.items():
+          def download(file_id, path):
               request = drive.files().get_media(fileId=file_id)
               fh = io.FileIO(path, "wb")
               downloader = MediaIoBaseDownload(fh, request)
               done = False
               while not done:
                   status, done = downloader.next_chunk()
+
+          for i, file_id in enumerate(image_ids, start=1):
+              download(file_id, f"input/scene{i}.png")
+
+          audio_id = "${{ github.event.inputs.audio_id }}"
+          if audio_id.strip():
+              download(audio_id.strip(), "input/audio.mp3")
+
+          with open("image_count.txt", "w") as f:
+              f.write(str(len(image_ids)))
           PY
 
       - name: Create silent audio if missing
         run: |
+          IMAGE_COUNT=$(cat image_count.txt)
+          DURATION=$((IMAGE_COUNT * 3))
+
           if [ ! -f input/audio.mp3 ]; then
-            ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 15 -q:a 9 -acodec libmp3lame input/audio.mp3
+            ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t "$DURATION" -q:a 9 -acodec libmp3lame input/audio.mp3
           fi
 
-      - name: Render video
+      - name: Create image clips
         run: |
-          ffmpeg \
-            -loop 1 -t 3 -i input/scene1.png \
-            -loop 1 -t 3 -i input/scene2.png \
-            -loop 1 -t 3 -i input/scene3.png \
-            -loop 1 -t 3 -i input/scene4.png \
-            -loop 1 -t 3 -i input/scene5.png \
+          IMAGE_COUNT=$(cat image_count.txt)
+
+          for i in $(seq 1 $IMAGE_COUNT); do
+            ffmpeg -y \
+              -loop 1 -t 3 -i "input/scene${i}.png" \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" \
+              -r 30 \
+              -c:v libx264 \
+              -pix_fmt yuv420p \
+              "clips/clip${i}.mp4"
+
+            echo "file 'clip${i}.mp4'" >> clips/list.txt
+          done
+
+      - name: Concatenate clips and add audio
+        run: |
+          ffmpeg -y \
+            -f concat -safe 0 -i clips/list.txt \
             -i input/audio.mp3 \
-            -filter_complex "\
-            [0:v]scale=1080:1920,setsar=1[v0];\
-            [1:v]scale=1080:1920,setsar=1[v1];\
-            [2:v]scale=1080:1920,setsar=1[v2];\
-            [3:v]scale=1080:1920,setsar=1[v3];\
-            [4:v]scale=1080:1920,setsar=1[v4];\
-            [v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[v]" \
-            -map "[v]" -map 5:a \
+            -map 0:v -map 1:a \
             -shortest \
-            -r 30 \
             -c:v libx264 \
             -pix_fmt yuv420p \
             -c:a aac \
@@ -130,5 +130,5 @@ jobs:
               fields="id,name,webViewLink"
           ).execute()
 
-          print("Uploaded:", uploaded)
+          print(uploaded)
           PY
