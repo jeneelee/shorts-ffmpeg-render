@@ -5,12 +5,6 @@ on:
     inputs:
       job_id:
         required: true
-      image_ids:
-        required: true
-      audio_id:
-        required: false
-      output_folder_id:
-        required: true
 
 jobs:
   render:
@@ -28,54 +22,59 @@ jobs:
           mkdir -p input clips output
           echo '${{ secrets.GCP_SERVICE_ACCOUNT }}' > service-account.json
 
-      - name: Download images and audio from Google Drive
+      - name: Download images from Google Drive temp
         run: |
           python - <<'PY'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io, os
+          import io, os, re
+
+          JOB_ID = "${{ github.event.inputs.job_id }}"
+          TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
 
           SCOPES = ["https://www.googleapis.com/auth/drive"]
-          creds = service_account.Credentials.from_service_account_file(
-              "service-account.json", scopes=SCOPES
-          )
+          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
           drive = build("drive", "v3", credentials=creds)
 
-          image_ids = "${{ github.event.inputs.image_ids }}".split(",")
-          image_ids = [x.strip() for x in image_ids if x.strip()]
+          query = f"'{TEMP_FOLDER_ID}' in parents and trashed=false and name contains '{JOB_ID}_scene_'"
+          results = drive.files().list(q=query, fields="files(id,name)", pageSize=1000).execute()
+          files = results.get("files", [])
 
-          def download(file_id, path):
-              request = drive.files().get_media(fileId=file_id)
-              fh = io.FileIO(path, "wb")
-              downloader = MediaIoBaseDownload(fh, request)
-              done = False
-              while not done:
-                  status, done = downloader.next_chunk()
+          if not files:
+              raise Exception(f"No scene images found for job_id={JOB_ID}")
 
-          for i, file_id in enumerate(image_ids, start=1):
-              download(file_id, f"input/scene{i}.png")
+          def scene_number(name):
+              m = re.search(r"_scene_(\d+)", name)
+              return int(m.group(1)) if m else 999999
 
-          audio_id = "${{ github.event.inputs.audio_id }}"
-          if audio_id.strip():
-              download(audio_id.strip(), "input/audio.mp3")
+          files.sort(key=lambda f: scene_number(f["name"]))
+
+          with open("downloaded_files.txt", "w") as log:
+              for idx, f in enumerate(files, start=1):
+                  path = f"input/scene{idx}.png"
+                  request = drive.files().get_media(fileId=f["id"])
+                  fh = io.FileIO(path, "wb")
+                  downloader = MediaIoBaseDownload(fh, request)
+                  done = False
+                  while not done:
+                      status, done = downloader.next_chunk()
+                  log.write(f'{f["id"]},{f["name"]}\n')
 
           with open("image_count.txt", "w") as f:
-              f.write(str(len(image_ids)))
+              f.write(str(len(files)))
           PY
 
-      - name: Create silent audio if missing
+      - name: Create silent audio
         run: |
           IMAGE_COUNT=$(cat image_count.txt)
           DURATION=$((IMAGE_COUNT * 3))
-
-          if [ ! -f input/audio.mp3 ]; then
-            ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t "$DURATION" -q:a 9 -acodec libmp3lame input/audio.mp3
-          fi
+          ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t "$DURATION" -q:a 9 -acodec libmp3lame input/audio.mp3
 
       - name: Create image clips
         run: |
           IMAGE_COUNT=$(cat image_count.txt)
+          > clips/list.txt
 
           for i in $(seq 1 $IMAGE_COUNT); do
             ffmpeg -y \
@@ -101,26 +100,24 @@ jobs:
             -c:a aac \
             output/short_${{ github.event.inputs.job_id }}.mp4
 
-      - name: Upload video to Google Drive
+      - name: Upload video to Google Drive videos
         run: |
           python - <<'PY'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
+          JOB_ID = "${{ github.event.inputs.job_id }}"
+          VIDEOS_FOLDER_ID = "${{ secrets.VIDEOS_FOLDER_ID }}"
+
           SCOPES = ["https://www.googleapis.com/auth/drive"]
-          creds = service_account.Credentials.from_service_account_file(
-              "service-account.json", scopes=SCOPES
-          )
+          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
           drive = build("drive", "v3", credentials=creds)
 
-          job_id = "${{ github.event.inputs.job_id }}"
-          folder_id = "${{ github.event.inputs.output_folder_id }}"
-          file_path = f"output/short_{job_id}.mp4"
-
+          file_path = f"output/short_{JOB_ID}.mp4"
           metadata = {
-              "name": f"short_{job_id}.mp4",
-              "parents": [folder_id]
+              "name": f"short_{JOB_ID}.mp4",
+              "parents": [VIDEOS_FOLDER_ID]
           }
 
           media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
@@ -131,4 +128,23 @@ jobs:
           ).execute()
 
           print(uploaded)
+          PY
+
+      - name: Delete temp images for this job
+        run: |
+          python - <<'PY'
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+
+          TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
+
+          SCOPES = ["https://www.googleapis.com/auth/drive"]
+          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
+          drive = build("drive", "v3", credentials=creds)
+
+          with open("downloaded_files.txt", "r") as f:
+              for line in f:
+                  file_id = line.split(",", 1)[0].strip()
+                  if file_id:
+                      drive.files().delete(fileId=file_id).execute()
           PY
