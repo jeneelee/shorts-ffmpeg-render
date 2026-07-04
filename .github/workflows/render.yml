@@ -106,19 +106,3 @@ jobs:
           name: short_${{ github.event.inputs.job_id }}
           path: output/short_${{ github.event.inputs.job_id }}.mp4
 
-      - name: Delete temp images for this job
-        run: |
-          python - <<'PY'
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-
-          SCOPES = ["https://www.googleapis.com/auth/drive"]
-          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
-          drive = build("drive", "v3", credentials=creds)
-
-          with open("downloaded_files.txt", "r") as f:
-              for line in f:
-                  file_id = line.split(",", 1)[0].strip()
-                  if file_id:
-                      drive.files().delete(fileId=file_id).execute()
-          PY
