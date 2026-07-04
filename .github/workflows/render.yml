@@ -100,43 +100,17 @@ jobs:
             -c:a aac \
             output/short_${{ github.event.inputs.job_id }}.mp4
 
-      - name: Upload video to Google Drive videos
-        run: |
-          python - <<'PY'
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
-
-          JOB_ID = "${{ github.event.inputs.job_id }}"
-          VIDEOS_FOLDER_ID = "${{ secrets.VIDEOS_FOLDER_ID }}"
-
-          SCOPES = ["https://www.googleapis.com/auth/drive"]
-          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
-          drive = build("drive", "v3", credentials=creds)
-
-          file_path = f"output/short_{JOB_ID}.mp4"
-          metadata = {
-              "name": f"short_{JOB_ID}.mp4",
-              "parents": [VIDEOS_FOLDER_ID]
-          }
-
-          media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
-          uploaded = drive.files().create(
-              body=metadata,
-              media_body=media,
-              fields="id,name,webViewLink"
-          ).execute()
-
-          print(uploaded)
-          PY
+      - name: Upload rendered video as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: short_${{ github.event.inputs.job_id }}
+          path: output/short_${{ github.event.inputs.job_id }}.mp4
 
       - name: Delete temp images for this job
         run: |
           python - <<'PY'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
-
-          TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
 
           SCOPES = ["https://www.googleapis.com/auth/drive"]
           creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
