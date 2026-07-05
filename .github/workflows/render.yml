@@ -6,6 +6,9 @@ on:
       job_id:
         required: true
 
+permissions:
+  contents: write
+
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -28,7 +31,7 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io, os, re
+          import io, re
 
           JOB_ID = "${{ github.event.inputs.job_id }}"
           TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
@@ -100,9 +103,11 @@ jobs:
             -c:a aac \
             output/short_${{ github.event.inputs.job_id }}.mp4
 
-      - name: Upload rendered video as artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload mp4 to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: short_${{ github.event.inputs.job_id }}
-          path: output/short_${{ github.event.inputs.job_id }}.mp4
-
+          tag_name: render-${{ github.event.inputs.job_id }}
+          name: Render ${{ github.event.inputs.job_id }}
+          files: output/short_${{ github.event.inputs.job_id }}.mp4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
