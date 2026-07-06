@@ -53,26 +53,51 @@ jobs:
 
           files.sort(key=lambda f: scene_number(f["name"]))
 
-          with open("downloaded_files.txt", "w") as log:
-              for idx, f in enumerate(files, start=1):
-                  path = f"input/scene{idx}.png"
-                  request = drive.files().get_media(fileId=f["id"])
-                  fh = io.FileIO(path, "wb")
-                  downloader = MediaIoBaseDownload(fh, request)
-                  done = False
-                  while not done:
-                      status, done = downloader.next_chunk()
-                  log.write(f'{f["id"]},{f["name"]}\n')
+          for idx, f in enumerate(files, start=1):
+              path = f"input/scene{idx}.png"
+              request = drive.files().get_media(fileId=f["id"])
+              fh = io.FileIO(path, "wb")
+              downloader = MediaIoBaseDownload(fh, request)
+              done = False
+              while not done:
+                  status, done = downloader.next_chunk()
 
           with open("image_count.txt", "w") as f:
               f.write(str(len(files)))
           PY
 
-      - name: Create silent audio
+      - name: Download TTS audio from Google Drive
         run: |
-          IMAGE_COUNT=$(cat image_count.txt)
-          DURATION=$((IMAGE_COUNT * 3))
-          ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t "$DURATION" -q:a 9 -acodec libmp3lame input/audio.mp3
+          python - <<'PY'
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
+          import io
+
+          JOB_ID = "${{ github.event.inputs.job_id }}"
+          AUDIO_FOLDER_ID = "${{ secrets.AUDIO_FOLDER_ID }}"
+
+          SCOPES = ["https://www.googleapis.com/auth/drive"]
+          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
+          drive = build("drive", "v3", credentials=creds)
+
+          target_name = f"{JOB_ID}_voice.mp3"
+          query = f"'{AUDIO_FOLDER_ID}' in parents and trashed=false and name='{target_name}'"
+          results = drive.files().list(q=query, fields="files(id,name)", pageSize=10).execute()
+          files = results.get("files", [])
+
+          if not files:
+              raise Exception(f"No audio file found: {target_name}")
+
+          file_id = files[0]["id"]
+          request = drive.files().get_media(fileId=file_id)
+          fh = io.FileIO("input/audio.mp3", "wb")
+          downloader = MediaIoBaseDownload(fh, request)
+
+          done = False
+          while not done:
+              status, done = downloader.next_chunk()
+          PY
 
       - name: Create image clips
         run: |
@@ -91,7 +116,7 @@ jobs:
             echo "file 'clip${i}.mp4'" >> clips/list.txt
           done
 
-      - name: Concatenate clips and add audio
+      - name: Concatenate clips and add TTS audio
         run: |
           ffmpeg -y \
             -f concat -safe 0 -i clips/list.txt \
