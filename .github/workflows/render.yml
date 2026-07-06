@@ -31,7 +31,7 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io, re
+          import io, re, time
 
           JOB_ID = "${{ github.event.inputs.job_id }}"
           TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
@@ -41,8 +41,23 @@ jobs:
           drive = build("drive", "v3", credentials=creds)
 
           query = f"'{TEMP_FOLDER_ID}' in parents and trashed=false and name contains '{JOB_ID}_scene_'"
-          results = drive.files().list(q=query, fields="files(id,name)", pageSize=1000).execute()
-          files = results.get("files", [])
+
+          files = []
+          for attempt in range(1, 7):
+              results = drive.files().list(
+                  q=query,
+                  fields="files(id,name)",
+                  pageSize=1000
+              ).execute()
+
+              files = results.get("files", [])
+
+              if files:
+                  print(f"Found {len(files)} image files on attempt {attempt}")
+                  break
+
+              print(f"No image files found yet. Retry {attempt}/6...")
+              time.sleep(5)
 
           if not files:
               raise Exception(f"No scene images found for job_id={JOB_ID}")
@@ -55,9 +70,12 @@ jobs:
 
           for idx, f in enumerate(files, start=1):
               path = f"input/scene{idx}.png"
+              print(f"Downloading image: {f['name']} -> {path}")
+
               request = drive.files().get_media(fileId=f["id"])
               fh = io.FileIO(path, "wb")
               downloader = MediaIoBaseDownload(fh, request)
+
               done = False
               while not done:
                   status, done = downloader.next_chunk()
@@ -72,7 +90,7 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io
+          import io, time
 
           JOB_ID = "${{ github.event.inputs.job_id }}"
           AUDIO_FOLDER_ID = "${{ secrets.AUDIO_FOLDER_ID }}"
@@ -81,15 +99,31 @@ jobs:
           creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
           drive = build("drive", "v3", credentials=creds)
 
-          target_name = f"{JOB_ID}_voice.mp3"
-          query = f"'{AUDIO_FOLDER_ID}' in parents and trashed=false and name='{target_name}'"
-          results = drive.files().list(q=query, fields="files(id,name)", pageSize=10).execute()
-          files = results.get("files", [])
+          query = f"'{AUDIO_FOLDER_ID}' in parents and trashed=false and name contains '{JOB_ID}_voice'"
+
+          files = []
+          for attempt in range(1, 7):
+              results = drive.files().list(
+                  q=query,
+                  fields="files(id,name,createdTime)",
+                  pageSize=10
+              ).execute()
+
+              files = results.get("files", [])
+
+              if files:
+                  print(f"Found audio file on attempt {attempt}: {files[0]['name']}")
+                  break
+
+              print(f"No audio file found yet for job_id={JOB_ID}. Retry {attempt}/6...")
+              time.sleep(5)
 
           if not files:
-              raise Exception(f"No audio file found: {target_name}")
+              raise Exception(f"No audio file found for job_id={JOB_ID}")
 
+          files.sort(key=lambda f: f.get("createdTime", ""), reverse=True)
           file_id = files[0]["id"]
+
           request = drive.files().get_media(fileId=file_id)
           fh = io.FileIO("input/audio.mp3", "wb")
           downloader = MediaIoBaseDownload(fh, request)
@@ -97,16 +131,36 @@ jobs:
           done = False
           while not done:
               status, done = downloader.next_chunk()
+
+          print(f"Downloaded audio as input/audio.mp3")
           PY
+
+      - name: Get audio duration
+        run: |
+          AUDIO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input/audio.mp3)
+          echo "$AUDIO_DURATION" > audio_duration.txt
+          echo "Audio duration: $AUDIO_DURATION"
 
       - name: Create image clips
         run: |
           IMAGE_COUNT=$(cat image_count.txt)
+          AUDIO_DURATION=$(cat audio_duration.txt)
+
+          CLIP_DURATION=$(python - <<PY
+          image_count = int("$IMAGE_COUNT")
+          audio_duration = float("$AUDIO_DURATION")
+          print(max(audio_duration / image_count, 3))
+          PY
+          )
+
+          echo "Image count: $IMAGE_COUNT"
+          echo "Clip duration: $CLIP_DURATION"
+
           > clips/list.txt
 
           for i in $(seq 1 $IMAGE_COUNT); do
             ffmpeg -y \
-              -loop 1 -t 3 -i "input/scene${i}.png" \
+              -loop 1 -t "$CLIP_DURATION" -i "input/scene${i}.png" \
               -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" \
               -r 30 \
               -c:v libx264 \
