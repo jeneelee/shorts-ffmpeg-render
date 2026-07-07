@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-cjk
+          sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-nanum
           pip install google-api-python-client google-auth faster-whisper
 
       - name: Prepare folders
@@ -143,7 +143,7 @@ jobs:
           import re
 
           audio_path = "input/audio.mp3"
-          output_path = "input/subtitle.srt"
+          output_path = "input/subtitle.ass"
 
           model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
@@ -151,36 +151,82 @@ jobs:
               audio_path,
               language="ko",
               vad_filter=True,
-              beam_size=5
+              beam_size=5,
+              word_timestamps=True
           )
 
-          def srt_time(seconds):
-              ms_total = int(round(max(seconds, 0) * 1000))
-              h = ms_total // 3600000
-              ms_total %= 3600000
-              m = ms_total // 60000
-              ms_total %= 60000
-              s = ms_total // 1000
-              ms = ms_total % 1000
-              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+          def ass_time(seconds):
+              seconds = max(seconds, 0)
+              h = int(seconds // 3600)
+              m = int((seconds % 3600) // 60)
+              s = int(seconds % 60)
+              cs = int((seconds - int(seconds)) * 100)
+              return f"{h}:{m:02}:{s:02}.{cs:02}"
 
           def clean_text(text):
               text = re.sub(r"\s+", " ", text.strip())
-              return text
+              text = text.replace(",", "")
+              text = text.replace(".", "")
+              text = text.replace("?", "")
+              text = text.replace("!", "")
+              return text.strip()
+
+          events = []
+
+          for seg in segments:
+              words = getattr(seg, "words", None)
+
+              if words:
+                  buffer = []
+                  start = None
+                  end = None
+
+                  for w in words:
+                      word = clean_text(w.word)
+                      if not word:
+                          continue
+
+                      if start is None:
+                          start = w.start
+
+                      buffer.append(word)
+                      end = w.end
+
+                      joined = " ".join(buffer)
+
+                      if len(joined) >= 10 or len(buffer) >= 3:
+                          events.append((start, end, joined))
+                          buffer = []
+                          start = None
+                          end = None
+
+                  if buffer and start is not None and end is not None:
+                      events.append((start, end, " ".join(buffer)))
+
+              else:
+                  text = clean_text(seg.text)
+                  if text:
+                      events.append((seg.start, seg.end, text))
 
           with open(output_path, "w", encoding="utf-8") as f:
-              idx = 1
-              for seg in segments:
-                  text = clean_text(seg.text)
-                  if not text:
-                      continue
+              f.write("[Script Info]\n")
+              f.write("ScriptType: v4.00+\n")
+              f.write("PlayResX: 1080\n")
+              f.write("PlayResY: 1920\n\n")
 
-                  f.write(f"{idx}\n")
-                  f.write(f"{srt_time(seg.start)} --> {srt_time(seg.end)}\n")
-                  f.write(f"{text}\n\n")
-                  idx += 1
+              f.write("[V4+ Styles]\n")
+              f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+              f.write("Style: Default,Nanum Brush Script,82,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,2,2,70,70,210,1\n\n")
 
-          print(f"subtitle.srt created")
+              f.write("[Events]\n")
+              f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+
+              for start, end, text in events:
+                  if end - start < 0.25:
+                      end = start + 0.25
+                  f.write(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}\n")
+
+          print(f"subtitle.ass created: {len(events)} subtitles")
           PY
 
       - name: Create image clips
@@ -218,7 +264,7 @@ jobs:
             -f concat -safe 0 -i clips/list.txt \
             -i input/audio.mp3 \
             -map 0:v -map 1:a \
-            -vf "subtitles=input/subtitle.srt:force_style='FontName=Noto Sans CJK KR,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=260'" \
+            -vf "ass=input/subtitle.ass" \
             -shortest \
             -c:v libx264 \
             -pix_fmt yuv420p \
