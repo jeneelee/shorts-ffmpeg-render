@@ -44,12 +44,7 @@ jobs:
 
           files = []
           for attempt in range(1, 7):
-              results = drive.files().list(
-                  q=query,
-                  fields="files(id,name)",
-                  pageSize=1000
-              ).execute()
-
+              results = drive.files().list(q=query, fields="files(id,name)", pageSize=1000).execute()
               files = results.get("files", [])
 
               if files:
@@ -150,7 +145,7 @@ jobs:
           audio_path = "input/audio.mp3"
           output_path = "input/subtitle.srt"
 
-          model = WhisperModel("small", device="cpu", compute_type="int8")
+          model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
           segments, info = model.transcribe(
               audio_path,
@@ -160,9 +155,7 @@ jobs:
           )
 
           def srt_time(seconds):
-              if seconds < 0:
-                  seconds = 0
-              ms_total = int(round(seconds * 1000))
+              ms_total = int(round(max(seconds, 0) * 1000))
               h = ms_total // 3600000
               ms_total %= 3600000
               m = ms_total // 60000
@@ -171,60 +164,23 @@ jobs:
               ms = ms_total % 1000
               return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-          def split_korean_text(text, max_len=18):
+          def clean_text(text):
               text = re.sub(r"\s+", " ", text.strip())
-              if len(text) <= max_len:
-                  return [text]
-
-              parts = re.split(r"(?<=[.!?。？！])\s*", text)
-              chunks = []
-
-              for part in parts:
-                  part = part.strip()
-                  if not part:
-                      continue
-
-                  while len(part) > max_len:
-                      cut = part.rfind(" ", 0, max_len + 1)
-                      if cut == -1:
-                          cut = max_len
-                      chunks.append(part[:cut].strip())
-                      part = part[cut:].strip()
-
-                  if part:
-                      chunks.append(part)
-
-              return chunks
-
-          subtitle_items = []
-
-          for seg in segments:
-              text = seg.text.strip()
-              if not text:
-                  continue
-
-              chunks = split_korean_text(text, max_len=18)
-              duration = max(seg.end - seg.start, 0.1)
-              total_chars = sum(max(len(c), 1) for c in chunks)
-
-              current = seg.start
-
-              for chunk in chunks:
-                  ratio = max(len(chunk), 1) / total_chars
-                  chunk_duration = duration * ratio
-                  start = current
-                  end = current + chunk_duration
-                  current = end
-
-                  subtitle_items.append((start, end, chunk))
+              return text
 
           with open(output_path, "w", encoding="utf-8") as f:
-              for i, (start, end, text) in enumerate(subtitle_items, start=1):
-                  f.write(f"{i}\n")
-                  f.write(f"{srt_time(start)} --> {srt_time(end)}\n")
-                  f.write(f"{text}\n\n")
+              idx = 1
+              for seg in segments:
+                  text = clean_text(seg.text)
+                  if not text:
+                      continue
 
-          print(f"subtitle.srt created: {len(subtitle_items)} subtitles")
+                  f.write(f"{idx}\n")
+                  f.write(f"{srt_time(seg.start)} --> {srt_time(seg.end)}\n")
+                  f.write(f"{text}\n\n")
+                  idx += 1
+
+          print(f"subtitle.srt created")
           PY
 
       - name: Create image clips
@@ -262,7 +218,7 @@ jobs:
             -f concat -safe 0 -i clips/list.txt \
             -i input/audio.mp3 \
             -map 0:v -map 1:a \
-            -vf "subtitles=input/subtitle.srt:force_style='FontName=Noto Sans CJK KR,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=260'" \
+            -vf "subtitles=input/subtitle.srt:force_style='FontName=Noto Sans CJK KR,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=260'" \
             -shortest \
             -c:v libx264 \
             -pix_fmt yuv420p \
