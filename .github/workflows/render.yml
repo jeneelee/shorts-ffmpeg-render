@@ -5,6 +5,8 @@ on:
     inputs:
       job_id:
         required: true
+      subtitle_json:
+        required: true
 
 permissions:
   contents: write
@@ -18,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-nanum
-          pip install google-api-python-client google-auth faster-whisper
+          pip install google-api-python-client google-auth
 
       - name: Prepare folders
         run: |
@@ -136,77 +138,51 @@ jobs:
           echo "$AUDIO_DURATION" > audio_duration.txt
           echo "Audio duration: $AUDIO_DURATION"
 
-      - name: Generate subtitles with faster-whisper
+      - name: Generate subtitles from subtitle_json
+        env:
+          SUBTITLE_JSON: ${{ github.event.inputs.subtitle_json }}
         run: |
           python - <<'PY'
-          from faster_whisper import WhisperModel
-          import re
+          import os, json, re
 
-          audio_path = "input/audio.mp3"
           output_path = "input/subtitle.ass"
+          raw = os.environ.get("SUBTITLE_JSON", "").strip()
 
-          model = WhisperModel("tiny", device="cpu", compute_type="int8")
+          if not raw:
+              raise Exception("subtitle_json input is empty")
 
-          segments, info = model.transcribe(
-              audio_path,
-              language="ko",
-              vad_filter=True,
-              beam_size=5,
-              word_timestamps=True
-          )
+          subtitles = json.loads(raw)
 
-          def ass_time(seconds):
-              seconds = max(seconds, 0)
+          if not isinstance(subtitles, list):
+              raise Exception("subtitle_json must be a JSON array")
+
+          def srt_to_ass_time(value):
+              if isinstance(value, (int, float)):
+                  seconds = float(value)
+              else:
+                  text = str(value).strip()
+                  if re.fullmatch(r"\d+(\.\d+)?", text):
+                      seconds = float(text)
+                  else:
+                      m = re.match(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})", text)
+                      if not m:
+                          raise Exception(f"Invalid subtitle time format: {value}")
+                      h, mi, s, ms = map(int, m.groups())
+                      seconds = h * 3600 + mi * 60 + s + ms / 1000
+
               h = int(seconds // 3600)
-              m = int((seconds % 3600) // 60)
+              mi = int((seconds % 3600) // 60)
               s = int(seconds % 60)
               cs = int((seconds - int(seconds)) * 100)
-              return f"{h}:{m:02}:{s:02}.{cs:02}"
+              return f"{h}:{mi:02}:{s:02}.{cs:02}"
 
-          def clean_text(text):
-              text = re.sub(r"\s+", " ", text.strip())
-              text = text.replace(",", "")
-              text = text.replace(".", "")
-              text = text.replace("?", "")
-              text = text.replace("!", "")
+          def clean_ass_text(text):
+              text = str(text)
+              text = text.replace("\\n", r"\N")
+              text = text.replace("\n", r"\N")
+              text = text.replace("{", "")
+              text = text.replace("}", "")
               return text.strip()
-
-          events = []
-
-          for seg in segments:
-              words = getattr(seg, "words", None)
-
-              if words:
-                  buffer = []
-                  start = None
-                  end = None
-
-                  for w in words:
-                      word = clean_text(w.word)
-                      if not word:
-                          continue
-
-                      if start is None:
-                          start = w.start
-
-                      buffer.append(word)
-                      end = w.end
-
-                      joined = " ".join(buffer)
-
-                      if len(joined) >= 10 or len(buffer) >= 3:
-                          events.append((start, end, joined))
-                          buffer = []
-                          start = None
-                          end = None
-
-                  if buffer and start is not None and end is not None:
-                      events.append((start, end, " ".join(buffer)))
-
-              else:
-                  text = clean_text(seg.text)
-                  if text:
-                      events.append((seg.start, seg.end, text))
 
           with open(output_path, "w", encoding="utf-8") as f:
               f.write("[Script Info]\n")
@@ -221,12 +197,14 @@ jobs:
               f.write("[Events]\n")
               f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 
-              for start, end, text in events:
-                  if end - start < 0.25:
-                      end = start + 0.25
-                  f.write(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}\n")
+              for item in subtitles:
+                  start = srt_to_ass_time(item["start"])
+                  end = srt_to_ass_time(item["end"])
+                  text = clean_ass_text(item["text"])
+                  if text:
+                      f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
 
-          print(f"subtitle.ass created: {len(events)} subtitles")
+          print(f"subtitle.ass created from subtitle_json: {len(subtitles)} items")
           PY
 
       - name: Create image clips
