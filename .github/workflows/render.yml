@@ -5,6 +5,10 @@ on:
     inputs:
       job_id:
         required: true
+      thumbnail_title:
+        required: true
+      thumbnail_subtitle:
+        required: true
 
 permissions:
   contents: write
@@ -18,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-nanum
-          pip install google-api-python-client google-auth
+          pip install google-api-python-client google-auth pillow
 
       - name: Prepare folders
         run: |
@@ -75,6 +79,146 @@ jobs:
 
           with open("image_count.txt", "w") as f:
               f.write(str(len(files)))
+          PY
+
+      - name: Create thumbnail image
+        env:
+          THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
+          THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
+        run: |
+          python - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          import os, random
+
+          title = os.environ.get("THUMBNAIL_TITLE", "").strip()
+          subtitle = os.environ.get("THUMBNAIL_SUBTITLE", "").strip()
+          job_id = "${{ github.event.inputs.job_id }}"
+
+          if not title:
+              raise Exception("thumbnail_title is empty")
+          if not subtitle:
+              raise Exception("thumbnail_subtitle is empty")
+
+          W, H = 1080, 1920
+          bg_path = "input/scene1.png"
+
+          img = Image.open(bg_path).convert("RGB")
+          iw, ih = img.size
+          scale = max(W / iw, H / ih)
+          nw, nh = int(iw * scale), int(ih * scale)
+          img = img.resize((nw, nh), Image.LANCZOS)
+          img = img.crop(((nw - W) // 2, (nh - H) // 2, (nw + W) // 2, (nh + H) // 2))
+
+          img = img.convert("RGBA")
+
+          warm_overlay = Image.new("RGBA", (W, H), (255, 235, 190, 55))
+          img = Image.alpha_composite(img, warm_overlay)
+
+          draw = ImageDraw.Draw(img)
+
+          title_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
+          subtitle_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
+
+          title_font = ImageFont.truetype(title_font_path, 185)
+
+          title_y = 115
+          chars = list(title)
+
+          char_widths = []
+          total_width = 0
+          for ch in chars:
+              box = draw.textbbox((0, 0), ch, font=title_font, stroke_width=6)
+              w = box[2] - box[0]
+              char_widths.append(w)
+              total_width += w
+
+          x = (W - total_width) // 2
+
+          for i, ch in enumerate(chars):
+              fill_color = (220, 42, 25, 255) if i >= max(len(chars) - 2, 0) else (20, 15, 10, 255)
+              draw.text(
+                  (x, title_y),
+                  ch,
+                  font=title_font,
+                  fill=fill_color,
+                  stroke_width=7,
+                  stroke_fill=(247, 229, 190, 255)
+              )
+              x += char_widths[i]
+
+          banner_y = 430
+          banner_h = 175
+
+          for _ in range(22):
+              y = banner_y + random.randint(-20, 20)
+              x1 = 70 + random.randint(-35, 20)
+              x2 = W - 70 + random.randint(-20, 35)
+              h = banner_h + random.randint(-28, 28)
+              draw.rounded_rectangle(
+                  [x1, y, x2, y + h],
+                  radius=22,
+                  fill=(20, 15, 10, 230)
+              )
+
+          subtitle = subtitle.replace(".", "").strip()
+
+          max_width = 900
+          font_size = 103
+
+          while font_size >= 58:
+              sub_font = ImageFont.truetype(subtitle_font_path, font_size)
+              box = draw.textbbox((0, 0), subtitle, font=sub_font, stroke_width=5)
+              text_w = box[2] - box[0]
+              if text_w <= max_width:
+                  break
+              font_size -= 4
+
+          sub_font = ImageFont.truetype(subtitle_font_path, font_size)
+          box = draw.textbbox((0, 0), subtitle, font=sub_font, stroke_width=5)
+          text_w = box[2] - box[0]
+          text_h = box[3] - box[1]
+          sub_x = (W - text_w) // 2
+          sub_y = banner_y + (banner_h - text_h) // 2 - 12
+
+          words = subtitle.split(" ", 1)
+
+          if len(words) == 2:
+              first = words[0] + " "
+              rest = words[1]
+
+              first_box = draw.textbbox((0, 0), first, font=sub_font, stroke_width=5)
+              first_w = first_box[2] - first_box[0]
+
+              draw.text(
+                  (sub_x, sub_y),
+                  first,
+                  font=sub_font,
+                  fill=(255, 185, 20, 255),
+                  stroke_width=5,
+                  stroke_fill=(0, 0, 0, 255)
+              )
+
+              draw.text(
+                  (sub_x + first_w, sub_y),
+                  rest,
+                  font=sub_font,
+                  fill=(255, 255, 255, 255),
+                  stroke_width=5,
+                  stroke_fill=(0, 0, 0, 255)
+              )
+          else:
+              draw.text(
+                  (sub_x, sub_y),
+                  subtitle,
+                  font=sub_font,
+                  fill=(255, 185, 20, 255),
+                  stroke_width=5,
+                  stroke_fill=(0, 0, 0, 255)
+              )
+
+          output_path = f"output/thumbnail_{job_id}.png"
+          img.convert("RGB").save(output_path, quality=95)
+          print(f"Thumbnail created: {output_path}")
           PY
 
       - name: Download TTS audio from Google Drive
@@ -192,11 +336,13 @@ jobs:
             -c:a aac \
             output/short_${{ github.event.inputs.job_id }}.mp4
 
-      - name: Upload mp4 to GitHub Release
+      - name: Upload mp4 and thumbnail to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: render-${{ github.event.inputs.job_id }}
           name: Render ${{ github.event.inputs.job_id }}
-          files: output/short_${{ github.event.inputs.job_id }}.mp4
+          files: |
+            output/short_${{ github.event.inputs.job_id }}.mp4
+            output/thumbnail_${{ github.event.inputs.job_id }}.png
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
