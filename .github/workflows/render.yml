@@ -5,8 +5,6 @@ on:
     inputs:
       job_id:
         required: true
-      subtitle_json:
-        required: true
 
 permissions:
   contents: write
@@ -48,11 +46,9 @@ jobs:
           for attempt in range(1, 7):
               results = drive.files().list(q=query, fields="files(id,name)", pageSize=1000).execute()
               files = results.get("files", [])
-
               if files:
                   print(f"Found {len(files)} image files on attempt {attempt}")
                   break
-
               print(f"No image files found yet. Retry {attempt}/6...")
               time.sleep(5)
 
@@ -138,74 +134,21 @@ jobs:
           echo "$AUDIO_DURATION" > audio_duration.txt
           echo "Audio duration: $AUDIO_DURATION"
 
-      - name: Generate subtitles from subtitle_json
-        env:
-          SUBTITLE_JSON: ${{ github.event.inputs.subtitle_json }}
+      - name: Create empty subtitle file
         run: |
-          python - <<'PY'
-          import os, json, re
+          cat > input/subtitle.ass <<'EOF'
+          [Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
 
-          output_path = "input/subtitle.ass"
-          raw = os.environ.get("SUBTITLE_JSON", "").strip()
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: Default,Nanum Brush Script,82,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,2,2,70,70,210,1
 
-          if not raw:
-              raise Exception("subtitle_json input is empty")
-
-          subtitles = json.loads(raw)
-
-          if not isinstance(subtitles, list):
-              raise Exception("subtitle_json must be a JSON array")
-
-          def srt_to_ass_time(value):
-              if isinstance(value, (int, float)):
-                  seconds = float(value)
-              else:
-                  text = str(value).strip()
-                  if re.fullmatch(r"\d+(\.\d+)?", text):
-                      seconds = float(text)
-                  else:
-                      m = re.match(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})", text)
-                      if not m:
-                          raise Exception(f"Invalid subtitle time format: {value}")
-                      h, mi, s, ms = map(int, m.groups())
-                      seconds = h * 3600 + mi * 60 + s + ms / 1000
-
-              h = int(seconds // 3600)
-              mi = int((seconds % 3600) // 60)
-              s = int(seconds % 60)
-              cs = int((seconds - int(seconds)) * 100)
-              return f"{h}:{mi:02}:{s:02}.{cs:02}"
-
-          def clean_ass_text(text):
-              text = str(text)
-              text = text.replace("\\n", r"\N")
-              text = text.replace("\n", r"\N")
-              text = text.replace("{", "")
-              text = text.replace("}", "")
-              return text.strip()
-
-          with open(output_path, "w", encoding="utf-8") as f:
-              f.write("[Script Info]\n")
-              f.write("ScriptType: v4.00+\n")
-              f.write("PlayResX: 1080\n")
-              f.write("PlayResY: 1920\n\n")
-
-              f.write("[V4+ Styles]\n")
-              f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-              f.write("Style: Default,Nanum Brush Script,82,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,2,2,70,70,210,1\n\n")
-
-              f.write("[Events]\n")
-              f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-
-              for item in subtitles:
-                  start = srt_to_ass_time(item["start"])
-                  end = srt_to_ass_time(item["end"])
-                  text = clean_ass_text(item["text"])
-                  if text:
-                      f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
-
-          print(f"subtitle.ass created from subtitle_json: {len(subtitles)} items")
-          PY
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          EOF
 
       - name: Create image clips
         run: |
@@ -236,7 +179,7 @@ jobs:
             echo "file 'clip${i}.mp4'" >> clips/list.txt
           done
 
-      - name: Concatenate clips and add TTS audio with subtitles
+      - name: Concatenate clips and add TTS audio
         run: |
           ffmpeg -y \
             -f concat -safe 0 -i clips/list.txt \
