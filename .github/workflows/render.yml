@@ -99,7 +99,7 @@ jobs:
           if not subtitle:
               raise Exception("thumbnail_subtitle is empty")
 
-          W, H = 1080, 1920
+          W, H = 1280, 720
           bg_path = "input/scene1.png"
 
           img = Image.open(bg_path).convert("RGB")
@@ -119,9 +119,9 @@ jobs:
           title_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
           subtitle_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
 
-          title_font = ImageFont.truetype(title_font_path, 185)
+          title_font = ImageFont.truetype(title_font_path, 125)
 
-          title_y = 115
+          title_y = 45
           chars = list(title)
 
           char_widths = []
@@ -146,8 +146,8 @@ jobs:
               )
               x += char_widths[i]
 
-          banner_y = 430
-          banner_h = 175
+          banner_y = 245
+          banner_h = 115
 
           for _ in range(22):
               y = banner_y + random.randint(-20, 20)
@@ -162,8 +162,8 @@ jobs:
 
           subtitle = subtitle.replace(".", "").strip()
 
-          max_width = 900
-          font_size = 103
+          max_width = 1080
+          font_size = 72
 
           while font_size >= 58:
               sub_font = ImageFont.truetype(subtitle_font_path, font_size)
