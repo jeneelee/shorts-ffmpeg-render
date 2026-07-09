@@ -146,8 +146,8 @@ jobs:
               )
               x += char_widths[i]
 
-          banner_y = 245
-          banner_h = 115
+          banner_y = 235
+          banner_h = 110
 
           for _ in range(22):
               y = banner_y + random.randint(-20, 20)
@@ -163,7 +163,7 @@ jobs:
           subtitle = subtitle.replace(".", "").strip()
 
           max_width = 1080
-          font_size = 72
+          font_size = 68
 
           while font_size >= 58:
               sub_font = ImageFont.truetype(subtitle_font_path, font_size)
