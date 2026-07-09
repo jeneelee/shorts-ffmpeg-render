@@ -119,7 +119,7 @@ jobs:
           title_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
           subtitle_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
 
-          title_font = ImageFont.truetype(title_font_path, 125)
+          title_font = ImageFont.truetype(title_font_path, 120)
 
           title_y = 45
           chars = list(title)
