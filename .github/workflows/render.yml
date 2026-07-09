@@ -121,7 +121,7 @@ jobs:
 
           title_font = ImageFont.truetype(title_font_path, 120)
 
-          title_y = 45
+          title_y = 40
           chars = list(title)
 
           char_widths = []
