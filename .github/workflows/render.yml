@@ -216,8 +216,8 @@ jobs:
                   stroke_fill=(0, 0, 0, 255)
               )
 
-          output_path = f"output/thumbnail_{job_id}.png"
-          img.convert("RGB").save(output_path, quality=95)
+          output_path = f"output/thumbnail_{job_id}.jpg"
+          img.convert("RGB").save(output_path,format="JPEG",quality=92,optimize=True)         
           print(f"Thumbnail created: {output_path}")
           PY
 
