@@ -343,6 +343,6 @@ jobs:
           name: Render ${{ github.event.inputs.job_id }}
           files: |
             output/short_${{ github.event.inputs.job_id }}.mp4
-            output/thumbnail_${{ github.event.inputs.job_id }}.png
+            output/thumbnail_${{ github.event.inputs.job_id }}.jpg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
