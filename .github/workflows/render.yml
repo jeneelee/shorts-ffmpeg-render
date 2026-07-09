@@ -37,10 +37,11 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io, re, time
+          import io, re, time, os
 
           JOB_ID = "${{ github.event.inputs.job_id }}"
           TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
+          EXPECTED_SCENES = 7
 
           SCOPES = ["https://www.googleapis.com/auth/drive"]
           creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
@@ -48,27 +49,53 @@ jobs:
 
           query = f"'{TEMP_FOLDER_ID}' in parents and trashed=false and name contains '{JOB_ID}_scene_'"
 
-          files = []
-          for attempt in range(1, 7):
-              results = drive.files().list(q=query, fields="files(id,name)", pageSize=1000).execute()
-              files = results.get("files", [])
-              if files:
-                  print(f"Found {len(files)} image files on attempt {attempt}")
-                  break
-              print(f"No image files found yet. Retry {attempt}/6...")
-              time.sleep(5)
-
-          if not files:
-              raise Exception(f"No scene images found for job_id={JOB_ID}")
-
           def scene_number(name):
               m = re.search(r"_scene_(\d+)", name)
-              return int(m.group(1)) if m else 999999
+              return int(m.group(1)) if m else None
 
-          files.sort(key=lambda f: scene_number(f["name"]))
+          selected = {}
 
-          for idx, f in enumerate(files, start=1):
-              path = f"input/scene{idx}.png"
+          for attempt in range(1, 13):
+              results = drive.files().list(
+                  q=query,
+                  fields="files(id,name,createdTime)",
+                  pageSize=1000
+              ).execute()
+
+              files = results.get("files", [])
+
+              selected = {}
+              for f in files:
+                  n = scene_number(f["name"])
+                  if n is not None and 1 <= n <= EXPECTED_SCENES:
+                      if n not in selected:
+                          selected[n] = f
+                      else:
+                          old_time = selected[n].get("createdTime", "")
+                          new_time = f.get("createdTime", "")
+                          if new_time > old_time:
+                              selected[n] = f
+
+              found_numbers = sorted(selected.keys())
+              print(f"Attempt {attempt}/12: found scenes {found_numbers} ({len(found_numbers)}/{EXPECTED_SCENES})")
+
+              if len(selected) == EXPECTED_SCENES:
+                  print("All 7 scene images found.")
+                  break
+
+              missing = [i for i in range(1, EXPECTED_SCENES + 1) if i not in selected]
+              print(f"Missing scenes: {missing}. Waiting 5 seconds...")
+              time.sleep(5)
+
+          if len(selected) != EXPECTED_SCENES:
+              missing = [i for i in range(1, EXPECTED_SCENES + 1) if i not in selected]
+              raise Exception(f"Expected 7 scene images, but found {len(selected)}. Missing scenes: {missing}. job_id={JOB_ID}")
+
+          os.makedirs("input", exist_ok=True)
+
+          for scene_idx in range(1, EXPECTED_SCENES + 1):
+              f = selected[scene_idx]
+              path = f"input/scene{scene_idx}.png"
               print(f"Downloading image: {f['name']} -> {path}")
 
               request = drive.files().get_media(fileId=f["id"])
@@ -80,7 +107,9 @@ jobs:
                   status, done = downloader.next_chunk()
 
           with open("image_count.txt", "w") as f:
-              f.write(str(len(files)))
+              f.write(str(EXPECTED_SCENES))
+
+          print("Downloaded all 7 scene images successfully.")
           PY
 
       - name: Create thumbnail image
@@ -401,7 +430,7 @@ jobs:
 
               t = 0.0
               for i, c in enumerate(chunks):
-                  start = t + 0.15
+                  start = t + 0.18
                   end = start + durations[i]
                   if i == len(chunks) - 1:
                       end = audio_duration
