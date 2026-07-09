@@ -9,6 +9,8 @@ on:
         required: true
       thumbnail_subtitle:
         required: true
+      voice_script:
+        required: true
 
 permissions:
   contents: write
@@ -87,7 +89,7 @@ jobs:
           THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
         run: |
           python - <<'PY'
-          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          from PIL import Image, ImageDraw, ImageFont
           import os, random
 
           title = os.environ.get("THUMBNAIL_TITLE", "").strip()
@@ -110,7 +112,6 @@ jobs:
           img = img.crop(((nw - W) // 2, (nh - H) // 2, (nw + W) // 2, (nh + H) // 2))
 
           img = img.convert("RGBA")
-
           warm_overlay = Image.new("RGBA", (W, H), (255, 235, 190, 55))
           img = Image.alpha_composite(img, warm_overlay)
 
@@ -120,7 +121,6 @@ jobs:
           subtitle_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
 
           title_font = ImageFont.truetype(title_font_path, 120)
-
           title_y = 40
           chars = list(title)
 
@@ -185,39 +185,16 @@ jobs:
           if len(words) == 2:
               first = words[0] + " "
               rest = words[1]
-
               first_box = draw.textbbox((0, 0), first, font=sub_font, stroke_width=5)
               first_w = first_box[2] - first_box[0]
 
-              draw.text(
-                  (sub_x, sub_y),
-                  first,
-                  font=sub_font,
-                  fill=(255, 185, 20, 255),
-                  stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255)
-              )
-
-              draw.text(
-                  (sub_x + first_w, sub_y),
-                  rest,
-                  font=sub_font,
-                  fill=(255, 255, 255, 255),
-                  stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255)
-              )
+              draw.text((sub_x, sub_y), first, font=sub_font, fill=(255, 185, 20, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
+              draw.text((sub_x + first_w, sub_y), rest, font=sub_font, fill=(255, 255, 255, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
           else:
-              draw.text(
-                  (sub_x, sub_y),
-                  subtitle,
-                  font=sub_font,
-                  fill=(255, 185, 20, 255),
-                  stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255)
-              )
+              draw.text((sub_x, sub_y), subtitle, font=sub_font, fill=(255, 185, 20, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
 
           output_path = f"output/thumbnail_{job_id}.jpg"
-          img.convert("RGB").save(output_path,format="JPEG",quality=92,optimize=True)         
+          img.convert("RGB").save(output_path, format="JPEG", quality=92, optimize=True)
           print(f"Thumbnail created: {output_path}")
           PY
 
@@ -278,21 +255,166 @@ jobs:
           echo "$AUDIO_DURATION" > audio_duration.txt
           echo "Audio duration: $AUDIO_DURATION"
 
-      - name: Create empty subtitle file
+      - name: Generate subtitle.ass from voice_script
+        env:
+          VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
+          THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
         run: |
-          cat > input/subtitle.ass <<'EOF'
-          [Script Info]
-          ScriptType: v4.00+
-          PlayResX: 1080
-          PlayResY: 1920
+          python - <<'PY'
+          import os, re, math
 
-          [V4+ Styles]
-          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Default,Nanum Brush Script,82,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,2,2,70,70,210,1
+          raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
+          title_word = os.environ.get("THUMBNAIL_TITLE", "").strip()
 
-          [Events]
-          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-          EOF
+          if not raw_script:
+              raise Exception("voice_script input is empty")
+
+          with open("audio_duration.txt", "r", encoding="utf-8") as f:
+              audio_duration = float(f.read().strip())
+
+          def clean_text(text):
+              text = re.sub(r"\[\d+\s*-\s*\d+초\]", "", text)
+              text = text.replace("\r", "\n")
+              text = re.sub(r"\n{2,}", "\n", text)
+              text = text.strip()
+              return text
+
+          def split_sentences(text):
+              lines = [line.strip() for line in text.split("\n") if line.strip()]
+              result = []
+              for line in lines:
+                  parts = re.split(r"(?<=[.!?。！？])\s*", line)
+                  for p in parts:
+                      p = p.strip()
+                      if p:
+                          result.append(p)
+              return result
+
+          def split_korean_chunk(sentence, max_chars=15):
+              sentence = sentence.strip()
+              if len(sentence) <= max_chars:
+                  return [sentence]
+
+              words = sentence.split()
+              chunks = []
+              cur = ""
+
+              if len(words) > 1:
+                  for w in words:
+                      test = (cur + " " + w).strip()
+                      if len(test) <= max_chars:
+                          cur = test
+                      else:
+                          if cur:
+                              chunks.append(cur)
+                          cur = w
+                  if cur:
+                      chunks.append(cur)
+              else:
+                  chunks = [sentence[i:i+max_chars] for i in range(0, len(sentence), max_chars)]
+
+              final = []
+              for c in chunks:
+                  if len(c) <= max_chars:
+                      final.append(c)
+                  else:
+                      final.extend([c[i:i+max_chars] for i in range(0, len(c), max_chars)])
+              return final
+
+          def make_caption_text(chunk):
+              chunk = chunk.strip()
+              if len(chunk) <= 9:
+                  return chunk
+
+              words = chunk.split()
+              if len(words) >= 2:
+                  mid = len(words) // 2
+                  line1 = " ".join(words[:mid])
+                  line2 = " ".join(words[mid:])
+                  if len(line1) <= 12 and len(line2) <= 12:
+                      return line1 + r"\N" + line2
+
+              if len(chunk) > 12:
+                  mid = len(chunk) // 2
+                  return chunk[:mid].strip() + r"\N" + chunk[mid:].strip()
+
+              return chunk
+
+          def ass_time(seconds):
+              seconds = max(0, float(seconds))
+              h = int(seconds // 3600)
+              m = int((seconds % 3600) // 60)
+              s = int(seconds % 60)
+              cs = int(round((seconds - int(seconds)) * 100))
+              if cs >= 100:
+                  s += 1
+                  cs = 0
+              return f"{h}:{m:02}:{s:02}.{cs:02}"
+
+          def esc_ass(text):
+              text = text.replace("{", "").replace("}", "")
+              return text
+
+          def highlight(text):
+              if title_word and title_word in text:
+                  return text.replace(title_word, r"{\c&H00B9FFFF&}" + title_word + r"{\c&H00FFFFFF&}")
+              return text
+
+          script = clean_text(raw_script)
+          sentences = split_sentences(script)
+
+          chunks = []
+          for s in sentences:
+              chunks.extend(split_korean_chunk(s, max_chars=15))
+
+          chunks = [c.strip() for c in chunks if c.strip()]
+
+          if not chunks:
+              raise Exception("No subtitle chunks generated")
+
+          weights = [max(len(re.sub(r"\s+", "", c)), 4) for c in chunks]
+          total_weight = sum(weights)
+
+          min_duration = 0.75
+          gap = 0.03
+          usable_duration = max(audio_duration - (gap * (len(chunks) - 1)), len(chunks) * min_duration)
+
+          raw_durations = [usable_duration * (w / total_weight) for w in weights]
+          durations = [max(min_duration, d) for d in raw_durations]
+
+          total = sum(durations) + gap * (len(chunks) - 1)
+          scale = audio_duration / total if total > audio_duration else 1.0
+          durations = [d * scale for d in durations]
+
+          with open("input/subtitle.ass", "w", encoding="utf-8") as f:
+              f.write("[Script Info]\n")
+              f.write("ScriptType: v4.00+\n")
+              f.write("PlayResX: 1080\n")
+              f.write("PlayResY: 1920\n\n")
+
+              f.write("[V4+ Styles]\n")
+              f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+              f.write("Style: Default,NanumGothicBold,92,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,7,2,2,70,70,250,1\n\n")
+
+              f.write("[Events]\n")
+              f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+
+              t = 0.0
+              for i, c in enumerate(chunks):
+                  start = t
+                  end = start + durations[i]
+                  if i == len(chunks) - 1:
+                      end = audio_duration
+
+                  text = make_caption_text(c)
+                  text = esc_ass(text)
+                  text = highlight(text)
+
+                  f.write(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}\n")
+                  t = end + gap
+
+          print(f"subtitle.ass created: {len(chunks)} captions, audio_duration={audio_duration}")
+          PY
 
       - name: Create image clips
         run: |
