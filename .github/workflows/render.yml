@@ -37,25 +37,39 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io, re, time, os
+          import io
+          import os
+          import re
+          import time
 
           JOB_ID = "${{ github.event.inputs.job_id }}"
           TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
           EXPECTED_SCENES = 7
+          MAX_ATTEMPTS = 12
+          WAIT_SECONDS = 5
 
           SCOPES = ["https://www.googleapis.com/auth/drive"]
-          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
+
+          creds = service_account.Credentials.from_service_account_file(
+              "service-account.json",
+              scopes=SCOPES
+          )
+
           drive = build("drive", "v3", credentials=creds)
 
-          query = f"'{TEMP_FOLDER_ID}' in parents and trashed=false and name contains '{JOB_ID}_scene_'"
+          query = (
+              f"'{TEMP_FOLDER_ID}' in parents "
+              f"and trashed=false "
+              f"and name contains '{JOB_ID}_scene_'"
+          )
 
           def scene_number(name):
-              m = re.search(r"_scene_(\d+)", name)
-              return int(m.group(1)) if m else None
+              match = re.search(r"_scene_(\d+)", name)
+              return int(match.group(1)) if match else None
 
           selected = {}
 
-          for attempt in range(1, 13):
+          for attempt in range(1, MAX_ATTEMPTS + 1):
               results = drive.files().list(
                   q=query,
                   fields="files(id,name,createdTime)",
@@ -63,51 +77,95 @@ jobs:
               ).execute()
 
               files = results.get("files", [])
-
               selected = {}
-              for f in files:
-                  n = scene_number(f["name"])
-                  if n is not None and 1 <= n <= EXPECTED_SCENES:
-                      if n not in selected:
-                          selected[n] = f
-                      else:
-                          old_time = selected[n].get("createdTime", "")
-                          new_time = f.get("createdTime", "")
-                          if new_time > old_time:
-                              selected[n] = f
+
+              for file_info in files:
+                  number = scene_number(file_info["name"])
+
+                  if number is None:
+                      continue
+
+                  if not 1 <= number <= EXPECTED_SCENES:
+                      continue
+
+                  if number not in selected:
+                      selected[number] = file_info
+                      continue
+
+                  old_created = selected[number].get("createdTime", "")
+                  new_created = file_info.get("createdTime", "")
+
+                  if new_created > old_created:
+                      selected[number] = file_info
 
               found_numbers = sorted(selected.keys())
-              print(f"Attempt {attempt}/12: found scenes {found_numbers} ({len(found_numbers)}/{EXPECTED_SCENES})")
+
+              print(
+                  f"Attempt {attempt}/{MAX_ATTEMPTS}: "
+                  f"found scenes {found_numbers} "
+                  f"({len(found_numbers)}/{EXPECTED_SCENES})"
+              )
 
               if len(selected) == EXPECTED_SCENES:
                   print("All 7 scene images found.")
                   break
 
-              missing = [i for i in range(1, EXPECTED_SCENES + 1) if i not in selected]
-              print(f"Missing scenes: {missing}. Waiting 5 seconds...")
-              time.sleep(5)
+              missing = [
+                  number
+                  for number in range(1, EXPECTED_SCENES + 1)
+                  if number not in selected
+              ]
+
+              print(
+                  f"Missing scenes: {missing}. "
+                  f"Waiting {WAIT_SECONDS} seconds..."
+              )
+
+              time.sleep(WAIT_SECONDS)
 
           if len(selected) != EXPECTED_SCENES:
-              missing = [i for i in range(1, EXPECTED_SCENES + 1) if i not in selected]
-              raise Exception(f"Expected 7 scene images, but found {len(selected)}. Missing scenes: {missing}. job_id={JOB_ID}")
+              missing = [
+                  number
+                  for number in range(1, EXPECTED_SCENES + 1)
+                  if number not in selected
+              ]
+
+              raise Exception(
+                  f"Expected {EXPECTED_SCENES} scene images, "
+                  f"but found {len(selected)}. "
+                  f"Missing scenes: {missing}. "
+                  f"job_id={JOB_ID}"
+              )
 
           os.makedirs("input", exist_ok=True)
 
           for scene_idx in range(1, EXPECTED_SCENES + 1):
-              f = selected[scene_idx]
-              path = f"input/scene{scene_idx}.png"
-              print(f"Downloading image: {f['name']} -> {path}")
+              file_info = selected[scene_idx]
+              output_path = f"input/scene{scene_idx}.png"
 
-              request = drive.files().get_media(fileId=f["id"])
-              fh = io.FileIO(path, "wb")
-              downloader = MediaIoBaseDownload(fh, request)
+              print(
+                  f"Downloading image: "
+                  f"{file_info['name']} -> {output_path}"
+              )
+
+              request = drive.files().get_media(
+                  fileId=file_info["id"]
+              )
+
+              file_handle = io.FileIO(output_path, "wb")
+
+              downloader = MediaIoBaseDownload(
+                  file_handle,
+                  request
+              )
 
               done = False
+
               while not done:
                   status, done = downloader.next_chunk()
 
-          with open("image_count.txt", "w") as f:
-              f.write(str(EXPECTED_SCENES))
+          with open("image_count.txt", "w", encoding="utf-8") as file:
+              file.write(str(EXPECTED_SCENES))
 
           print("Downloaded all 7 scene images successfully.")
           PY
@@ -119,111 +177,250 @@ jobs:
         run: |
           python - <<'PY'
           from PIL import Image, ImageDraw, ImageFont
-          import os, random
+          import os
+          import random
 
-          title = os.environ.get("THUMBNAIL_TITLE", "").strip()
-          subtitle = os.environ.get("THUMBNAIL_SUBTITLE", "").strip()
+          title = os.environ.get(
+              "THUMBNAIL_TITLE",
+              ""
+          ).strip()
+
+          subtitle = os.environ.get(
+              "THUMBNAIL_SUBTITLE",
+              ""
+          ).strip()
+
           job_id = "${{ github.event.inputs.job_id }}"
 
           if not title:
               raise Exception("thumbnail_title is empty")
+
           if not subtitle:
               raise Exception("thumbnail_subtitle is empty")
 
-          W, H = 1280, 720
-          bg_path = "input/scene7.png"
+          width = 1280
+          height = 720
 
-          img = Image.open(bg_path).convert("RGB")
-          iw, ih = img.size
-          scale = max(W / iw, H / ih)
-          nw, nh = int(iw * scale), int(ih * scale)
-          img = img.resize((nw, nh), Image.LANCZOS)
-          img = img.crop(((nw - W) // 2, (nh - H) // 2, (nw + W) // 2, (nh + H) // 2))
+          # 마지막 장면을 썸네일 배경으로 사용
+          background_path = "input/scene7.png"
 
-          img = img.convert("RGBA")
-          warm_overlay = Image.new("RGBA", (W, H), (255, 235, 190, 55))
-          img = Image.alpha_composite(img, warm_overlay)
+          image = Image.open(background_path).convert("RGB")
 
-          draw = ImageDraw.Draw(img)
+          original_width, original_height = image.size
 
-          title_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
-          subtitle_font_path = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
+          scale = max(
+              width / original_width,
+              height / original_height
+          )
 
-          title_font = ImageFont.truetype(title_font_path, 120)
+          resized_width = int(original_width * scale)
+          resized_height = int(original_height * scale)
+
+          image = image.resize(
+              (resized_width, resized_height),
+              Image.LANCZOS
+          )
+
+          left = (resized_width - width) // 2
+          top = (resized_height - height) // 2
+          right = left + width
+          bottom = top + height
+
+          image = image.crop(
+              (left, top, right, bottom)
+          )
+
+          image = image.convert("RGBA")
+
+          warm_overlay = Image.new(
+              "RGBA",
+              (width, height),
+              (255, 235, 190, 55)
+          )
+
+          image = Image.alpha_composite(
+              image,
+              warm_overlay
+          )
+
+          draw = ImageDraw.Draw(image)
+
+          title_font_path = (
+              "/usr/share/fonts/truetype/nanum/"
+              "NanumGothicBold.ttf"
+          )
+
+          subtitle_font_path = (
+              "/usr/share/fonts/truetype/nanum/"
+              "NanumGothicBold.ttf"
+          )
+
+          title_font = ImageFont.truetype(
+              title_font_path,
+              120
+          )
+
           title_y = 40
-          chars = list(title)
+          characters = list(title)
 
-          char_widths = []
+          character_widths = []
           total_width = 0
-          for ch in chars:
-              box = draw.textbbox((0, 0), ch, font=title_font, stroke_width=6)
-              w = box[2] - box[0]
-              char_widths.append(w)
-              total_width += w
 
-          x = (W - total_width) // 2
+          for character in characters:
+              box = draw.textbbox(
+                  (0, 0),
+                  character,
+                  font=title_font,
+                  stroke_width=6
+              )
 
-          for i, ch in enumerate(chars):
-              fill_color = (220, 42, 25, 255) if i >= max(len(chars) - 2, 0) else (20, 15, 10, 255)
+              character_width = box[2] - box[0]
+              character_widths.append(character_width)
+              total_width += character_width
+
+          title_x = (width - total_width) // 2
+
+          for index, character in enumerate(characters):
+              if index >= max(len(characters) - 2, 0):
+                  fill_color = (220, 42, 25, 255)
+              else:
+                  fill_color = (20, 15, 10, 255)
+
               draw.text(
-                  (x, title_y),
-                  ch,
+                  (title_x, title_y),
+                  character,
                   font=title_font,
                   fill=fill_color,
                   stroke_width=7,
                   stroke_fill=(247, 229, 190, 255)
               )
-              x += char_widths[i]
+
+              title_x += character_widths[index]
 
           banner_y = 235
-          banner_h = 110
+          banner_height = 110
 
           for _ in range(22):
-              y = banner_y + random.randint(-20, 20)
+              random_y = banner_y + random.randint(-20, 20)
               x1 = 70 + random.randint(-35, 20)
-              x2 = W - 70 + random.randint(-20, 35)
-              h = banner_h + random.randint(-28, 28)
+              x2 = width - 70 + random.randint(-20, 35)
+              rectangle_height = (
+                  banner_height + random.randint(-28, 28)
+              )
+
               draw.rounded_rectangle(
-                  [x1, y, x2, y + h],
+                  [
+                      x1,
+                      random_y,
+                      x2,
+                      random_y + rectangle_height
+                  ],
                   radius=22,
                   fill=(20, 15, 10, 230)
               )
 
           subtitle = subtitle.replace(".", "").strip()
 
-          max_width = 1080
-          font_size = 68
+          max_subtitle_width = 1080
+          subtitle_font_size = 68
 
-          while font_size >= 58:
-              sub_font = ImageFont.truetype(subtitle_font_path, font_size)
-              box = draw.textbbox((0, 0), subtitle, font=sub_font, stroke_width=5)
-              text_w = box[2] - box[0]
-              if text_w <= max_width:
+          while subtitle_font_size >= 58:
+              subtitle_font = ImageFont.truetype(
+                  subtitle_font_path,
+                  subtitle_font_size
+              )
+
+              box = draw.textbbox(
+                  (0, 0),
+                  subtitle,
+                  font=subtitle_font,
+                  stroke_width=5
+              )
+
+              subtitle_width = box[2] - box[0]
+
+              if subtitle_width <= max_subtitle_width:
                   break
-              font_size -= 4
 
-          sub_font = ImageFont.truetype(subtitle_font_path, font_size)
-          box = draw.textbbox((0, 0), subtitle, font=sub_font, stroke_width=5)
-          text_w = box[2] - box[0]
-          text_h = box[3] - box[1]
-          sub_x = (W - text_w) // 2
-          sub_y = banner_y + (banner_h - text_h) // 2 - 12
+              subtitle_font_size -= 4
+
+          subtitle_font = ImageFont.truetype(
+              subtitle_font_path,
+              subtitle_font_size
+          )
+
+          box = draw.textbbox(
+              (0, 0),
+              subtitle,
+              font=subtitle_font,
+              stroke_width=5
+          )
+
+          subtitle_width = box[2] - box[0]
+          subtitle_height = box[3] - box[1]
+
+          subtitle_x = (width - subtitle_width) // 2
+
+          subtitle_y = (
+              banner_y
+              + (banner_height - subtitle_height) // 2
+              - 12
+          )
 
           words = subtitle.split(" ", 1)
 
           if len(words) == 2:
-              first = words[0] + " "
-              rest = words[1]
-              first_box = draw.textbbox((0, 0), first, font=sub_font, stroke_width=5)
-              first_w = first_box[2] - first_box[0]
+              first_word = words[0] + " "
+              remaining_text = words[1]
 
-              draw.text((sub_x, sub_y), first, font=sub_font, fill=(255, 185, 20, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
-              draw.text((sub_x + first_w, sub_y), rest, font=sub_font, fill=(255, 255, 255, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
+              first_box = draw.textbbox(
+                  (0, 0),
+                  first_word,
+                  font=subtitle_font,
+                  stroke_width=5
+              )
+
+              first_width = first_box[2] - first_box[0]
+
+              draw.text(
+                  (subtitle_x, subtitle_y),
+                  first_word,
+                  font=subtitle_font,
+                  fill=(255, 185, 20, 255),
+                  stroke_width=5,
+                  stroke_fill=(0, 0, 0, 255)
+              )
+
+              draw.text(
+                  (subtitle_x + first_width, subtitle_y),
+                  remaining_text,
+                  font=subtitle_font,
+                  fill=(255, 255, 255, 255),
+                  stroke_width=5,
+                  stroke_fill=(0, 0, 0, 255)
+              )
+
           else:
-              draw.text((sub_x, sub_y), subtitle, font=sub_font, fill=(255, 185, 20, 255), stroke_width=5, stroke_fill=(0, 0, 0, 255))
+              draw.text(
+                  (subtitle_x, subtitle_y),
+                  subtitle,
+                  font=subtitle_font,
+                  fill=(255, 185, 20, 255),
+                  stroke_width=5,
+                  stroke_fill=(0, 0, 0, 255)
+              )
 
-          output_path = f"output/thumbnail_{job_id}.jpg"
-          img.convert("RGB").save(output_path, format="JPEG", quality=92, optimize=True)
+          output_path = (
+              f"output/thumbnail_{job_id}.jpg"
+          )
+
+          image.convert("RGB").save(
+              output_path,
+              format="JPEG",
+              quality=92,
+              optimize=True
+          )
+
           print(f"Thumbnail created: {output_path}")
           PY
 
@@ -233,18 +430,29 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
-          import io, time
+          import io
+          import time
 
           JOB_ID = "${{ github.event.inputs.job_id }}"
           AUDIO_FOLDER_ID = "${{ secrets.AUDIO_FOLDER_ID }}"
 
           SCOPES = ["https://www.googleapis.com/auth/drive"]
-          creds = service_account.Credentials.from_service_account_file("service-account.json", scopes=SCOPES)
+
+          creds = service_account.Credentials.from_service_account_file(
+              "service-account.json",
+              scopes=SCOPES
+          )
+
           drive = build("drive", "v3", credentials=creds)
 
-          query = f"'{AUDIO_FOLDER_ID}' in parents and trashed=false and name contains '{JOB_ID}_voice'"
+          query = (
+              f"'{AUDIO_FOLDER_ID}' in parents "
+              f"and trashed=false "
+              f"and name contains '{JOB_ID}_voice'"
+          )
 
           files = []
+
           for attempt in range(1, 7):
               results = drive.files().list(
                   q=query,
@@ -255,23 +463,50 @@ jobs:
               files = results.get("files", [])
 
               if files:
-                  print(f"Found audio file on attempt {attempt}: {files[0]['name']}")
+                  print(
+                      f"Found audio file on attempt "
+                      f"{attempt}: {files[0]['name']}"
+                  )
                   break
 
-              print(f"No audio file found yet for job_id={JOB_ID}. Retry {attempt}/6...")
+              print(
+                  f"No audio file found yet for "
+                  f"job_id={JOB_ID}. Retry {attempt}/6..."
+              )
+
               time.sleep(5)
 
           if not files:
-              raise Exception(f"No audio file found for job_id={JOB_ID}")
+              raise Exception(
+                  f"No audio file found for job_id={JOB_ID}"
+              )
 
-          files.sort(key=lambda f: f.get("createdTime", ""), reverse=True)
+          files.sort(
+              key=lambda file_info: file_info.get(
+                  "createdTime",
+                  ""
+              ),
+              reverse=True
+          )
+
           file_id = files[0]["id"]
 
-          request = drive.files().get_media(fileId=file_id)
-          fh = io.FileIO("input/audio.mp3", "wb")
-          downloader = MediaIoBaseDownload(fh, request)
+          request = drive.files().get_media(
+              fileId=file_id
+          )
+
+          file_handle = io.FileIO(
+              "input/audio.mp3",
+              "wb"
+          )
+
+          downloader = MediaIoBaseDownload(
+              file_handle,
+              request
+          )
 
           done = False
+
           while not done:
               status, done = downloader.next_chunk()
 
@@ -280,7 +515,12 @@ jobs:
 
       - name: Get audio duration
         run: |
-          AUDIO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input/audio.mp3)
+          AUDIO_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            input/audio.mp3)
+
           echo "$AUDIO_DURATION" > audio_duration.txt
           echo "Audio duration: $AUDIO_DURATION"
 
@@ -290,159 +530,392 @@ jobs:
           THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
         run: |
           python - <<'PY'
-          import os, re, math
+          import os
+          import re
 
-          raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
-          title_word = os.environ.get("THUMBNAIL_TITLE", "").strip()
+          raw_script = os.environ.get(
+              "VOICE_SCRIPT",
+              ""
+          ).strip()
+
+          title_word = os.environ.get(
+              "THUMBNAIL_TITLE",
+              ""
+          ).strip()
 
           if not raw_script:
               raise Exception("voice_script input is empty")
 
-          with open("audio_duration.txt", "r", encoding="utf-8") as f:
-              audio_duration = float(f.read().strip())
+          with open(
+              "audio_duration.txt",
+              "r",
+              encoding="utf-8"
+          ) as file:
+              audio_duration = float(
+                  file.read().strip()
+              )
 
           def clean_text(text):
-              text = re.sub(r"\[\d+\s*-\s*\d+초\]", "", text)
+              text = re.sub(
+                  r"\[\d+\s*-\s*\d+초\]",
+                  "",
+                  text
+              )
+
               text = text.replace("\r", "\n")
               text = re.sub(r"\n{2,}", "\n", text)
-              text = text.strip()
-              return text
+
+              return text.strip()
 
           def split_sentences(text):
-              lines = [line.strip() for line in text.split("\n") if line.strip()]
+              lines = [
+                  line.strip()
+                  for line in text.split("\n")
+                  if line.strip()
+              ]
+
               result = []
+
               for line in lines:
-                  parts = re.split(r"(?<=[.!?。！？])\s*", line)
-                  for p in parts:
-                      p = p.strip()
-                      if p:
-                          result.append(p)
+                  parts = re.split(
+                      r"(?<=[.!?。！？])\s*",
+                      line
+                  )
+
+                  for part in parts:
+                      part = part.strip()
+
+                      if part:
+                          result.append(part)
+
               return result
 
-          def split_korean_chunk(sentence, max_chars=20):
+          def split_korean_chunk(
+              sentence,
+              max_chars=20
+          ):
               sentence = sentence.strip()
+
               if len(sentence) <= max_chars:
                   return [sentence]
 
               words = sentence.split()
               chunks = []
-              cur = ""
+              current = ""
 
               if len(words) > 1:
-                  for w in words:
-                      test = (cur + " " + w).strip()
-                      if len(test) <= max_chars:
-                          cur = test
-                      else:
-                          if cur:
-                              chunks.append(cur)
-                          cur = w
-                  if cur:
-                      chunks.append(cur)
-              else:
-                  chunks = [sentence[i:i+max_chars] for i in range(0, len(sentence), max_chars)]
+                  for word in words:
+                      candidate = (
+                          current + " " + word
+                      ).strip()
 
-              final = []
-              for c in chunks:
-                  if len(c) <= max_chars:
-                      final.append(c)
+                      if len(candidate) <= max_chars:
+                          current = candidate
+                      else:
+                          if current:
+                              chunks.append(current)
+
+                          current = word
+
+                  if current:
+                      chunks.append(current)
+
+              else:
+                  chunks = [
+                      sentence[index:index + max_chars]
+                      for index in range(
+                          0,
+                          len(sentence),
+                          max_chars
+                      )
+                  ]
+
+              final_chunks = []
+
+              for chunk in chunks:
+                  if len(chunk) <= max_chars:
+                      final_chunks.append(chunk)
                   else:
-                      final.extend([c[i:i+max_chars] for i in range(0, len(c), max_chars)])
-              return final
+                      final_chunks.extend(
+                          [
+                              chunk[index:index + max_chars]
+                              for index in range(
+                                  0,
+                                  len(chunk),
+                                  max_chars
+                              )
+                          ]
+                      )
+
+              return final_chunks
 
           def make_caption_text(chunk):
               chunk = chunk.strip()
-              if len(chunk) <= 9:
+
+              # 16자 이하는 한 줄로 유지
+              if len(chunk) <= 16:
                   return chunk
 
               words = chunk.split()
+
+              # 가능한 경우 띄어쓰기 기준으로
+              # 가장 균형 잡힌 두 줄을 선택
               if len(words) >= 2:
-                  mid = len(words) // 2
-                  line1 = " ".join(words[:mid])
-                  line2 = " ".join(words[mid:])
-                  if len(line1) <= 12 and len(line2) <= 12:
-                      return line1 + r"\N" + line2
+                  best_line1 = ""
+                  best_line2 = ""
+                  smallest_difference = 999
 
-              if len(chunk) > 12:
-                  mid = len(chunk) // 2
-                  return chunk[:mid].strip() + r"\N" + chunk[mid:].strip()
+                  for index in range(1, len(words)):
+                      line1 = " ".join(words[:index])
+                      line2 = " ".join(words[index:])
 
-              return chunk
+                      if (
+                          len(line1) <= 16
+                          and len(line2) <= 16
+                      ):
+                          difference = abs(
+                              len(line1) - len(line2)
+                          )
+
+                          if (
+                              difference
+                              < smallest_difference
+                          ):
+                              smallest_difference = difference
+                              best_line1 = line1
+                              best_line2 = line2
+
+                  if best_line1 and best_line2:
+                      return (
+                          best_line1
+                          + r"\N"
+                          + best_line2
+                      )
+
+              # 띄어쓰기 기준 분할이 불가능하면
+              # 글자 중간을 기준으로 분할
+              middle = len(chunk) // 2
+
+              return (
+                  chunk[:middle].strip()
+                  + r"\N"
+                  + chunk[middle:].strip()
+              )
 
           def ass_time(seconds):
               seconds = max(0, float(seconds))
-              h = int(seconds // 3600)
-              m = int((seconds % 3600) // 60)
-              s = int(seconds % 60)
-              cs = int(round((seconds - int(seconds)) * 100))
-              if cs >= 100:
-                  s += 1
-                  cs = 0
-              return f"{h}:{m:02}:{s:02}.{cs:02}"
 
-          def esc_ass(text):
-              text = text.replace("{", "").replace("}", "")
-              return text
+              hours = int(seconds // 3600)
+
+              minutes = int(
+                  (seconds % 3600) // 60
+              )
+
+              whole_seconds = int(seconds % 60)
+
+              centiseconds = int(
+                  round(
+                      (
+                          seconds
+                          - int(seconds)
+                      ) * 100
+                  )
+              )
+
+              if centiseconds >= 100:
+                  whole_seconds += 1
+                  centiseconds = 0
+
+              return (
+                  f"{hours}:"
+                  f"{minutes:02}:"
+                  f"{whole_seconds:02}."
+                  f"{centiseconds:02}"
+              )
+
+          def escape_ass(text):
+              return (
+                  text
+                  .replace("{", "")
+                  .replace("}", "")
+              )
 
           def highlight(text):
               if title_word and title_word in text:
-                  return text.replace(title_word, r"{\c&H00B9FFFF&}" + title_word + r"{\c&H00FFFFFF&}")
+                  return text.replace(
+                      title_word,
+                      (
+                          r"{\c&H00B9FFFF&}"
+                          + title_word
+                          + r"{\c&H00FFFFFF&}"
+                      )
+                  )
+
               return text
 
           script = clean_text(raw_script)
           sentences = split_sentences(script)
 
           chunks = []
-          for s in sentences:
-              chunks.extend(split_korean_chunk(s, max_chars=20))
 
-          chunks = [c.strip() for c in chunks if c.strip()]
+          for sentence in sentences:
+              chunks.extend(
+                  split_korean_chunk(
+                      sentence,
+                      max_chars=20
+                  )
+              )
+
+          chunks = [
+              chunk.strip()
+              for chunk in chunks
+              if chunk.strip()
+          ]
 
           if not chunks:
-              raise Exception("No subtitle chunks generated")
+              raise Exception(
+                  "No subtitle chunks generated"
+              )
 
-          weights = [max(len(re.sub(r"\s+", "", c)), 4) for c in chunks]
+          weights = [
+              max(
+                  len(
+                      re.sub(
+                          r"\s+",
+                          "",
+                          chunk
+                      )
+                  ),
+                  4
+              )
+              for chunk in chunks
+          ]
+
           total_weight = sum(weights)
 
-          min_duration = 0.75
+          minimum_duration = 0.75
           gap = 0.03
-          usable_duration = max(audio_duration - (gap * (len(chunks) - 1)), len(chunks) * min_duration)
 
-          raw_durations = [usable_duration * (w / total_weight) for w in weights]
-          durations = [max(min_duration, d) for d in raw_durations]
+          total_gap_duration = (
+              gap * (len(chunks) - 1)
+          )
 
-          total = sum(durations) + gap * (len(chunks) - 1)
-          scale = audio_duration / total if total > audio_duration else 1.0
-          durations = [d * scale for d in durations]
+          usable_duration = max(
+              audio_duration - total_gap_duration,
+              len(chunks) * minimum_duration
+          )
 
-          with open("input/subtitle.ass", "w", encoding="utf-8") as f:
-              f.write("[Script Info]\n")
-              f.write("ScriptType: v4.00+\n")
-              f.write("PlayResX: 1080\n")
-              f.write("PlayResY: 1920\n\n")
+          raw_durations = [
+              usable_duration
+              * (weight / total_weight)
+              for weight in weights
+          ]
 
-              f.write("[V4+ Styles]\n")
-              f.write("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-              f.write("Style: Default,NanumGothicBold,92,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,7,2,2,70,70,250,1\n\n")
+          durations = [
+              max(minimum_duration, duration)
+              for duration in raw_durations
+          ]
 
-              f.write("[Events]\n")
-              f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+          calculated_total = (
+              sum(durations)
+              + total_gap_duration
+          )
 
-              t = 0.0
-              for i, c in enumerate(chunks):
-                  start = t
-                  end = start + durations[i]
-                  if i == len(chunks) - 1:
+          if calculated_total > audio_duration:
+              scale = (
+                  audio_duration
+                  / calculated_total
+              )
+
+              durations = [
+                  duration * scale
+                  for duration in durations
+              ]
+
+          with open(
+              "input/subtitle.ass",
+              "w",
+              encoding="utf-8"
+          ) as file:
+              file.write("[Script Info]\n")
+              file.write("ScriptType: v4.00+\n")
+              file.write("PlayResX: 1080\n")
+              file.write("PlayResY: 1920\n\n")
+
+              file.write("[V4+ Styles]\n")
+
+              file.write(
+                  "Format: Name, Fontname, Fontsize, "
+                  "PrimaryColour, SecondaryColour, "
+                  "OutlineColour, BackColour, Bold, "
+                  "Italic, Underline, StrikeOut, "
+                  "ScaleX, ScaleY, Spacing, Angle, "
+                  "BorderStyle, Outline, Shadow, "
+                  "Alignment, MarginL, MarginR, "
+                  "MarginV, Encoding\n"
+              )
+
+              file.write(
+                  "Style: Default,NanumGothicBold,92,"
+                  "&H00FFFFFF,&H000000FF,&H00000000,"
+                  "&H80000000,1,0,0,0,100,100,0,0,"
+                  "1,7,2,2,70,70,250,1\n\n"
+              )
+
+              file.write("[Events]\n")
+
+              file.write(
+                  "Format: Layer, Start, End, Style, "
+                  "Name, MarginL, MarginR, MarginV, "
+                  "Effect, Text\n"
+              )
+
+              current_time = 0.0
+
+              for index, chunk in enumerate(chunks):
+                  start = current_time
+
+                  end = min(
+                      start + durations[index],
+                      audio_duration
+                  )
+
+                  if index == len(chunks) - 1:
                       end = audio_duration
 
-                  text = make_caption_text(c)
-                  text = esc_ass(text)
-                  text = highlight(text)
+                  if end <= start:
+                      break
 
-                  f.write(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}\n")
-                  t = end + gap
+                  caption_text = make_caption_text(
+                      chunk
+                  )
 
-          print(f"subtitle.ass created: {len(chunks)} captions, audio_duration={audio_duration}")
+                  caption_text = escape_ass(
+                      caption_text
+                  )
+
+                  caption_text = highlight(
+                      caption_text
+                  )
+
+                  file.write(
+                      "Dialogue: 0,"
+                      f"{ass_time(start)},"
+                      f"{ass_time(end)},"
+                      "Default,,0,0,0,,"
+                      f"{caption_text}\n"
+                  )
+
+                  current_time = end + gap
+
+                  if current_time >= audio_duration:
+                      break
+
+          print(
+              f"subtitle.ass created: "
+              f"{len(chunks)} captions, "
+              f"audio_duration={audio_duration}"
+          )
           PY
 
       - name: Create image clips
@@ -462,9 +935,11 @@ jobs:
 
           > clips/list.txt
 
-          for i in $(seq 1 $IMAGE_COUNT); do
+          for i in $(seq 1 "$IMAGE_COUNT"); do
             ffmpeg -y \
-              -loop 1 -t "$CLIP_DURATION" -i "input/scene${i}.png" \
+              -loop 1 \
+              -t "$CLIP_DURATION" \
+              -i "input/scene${i}.png" \
               -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" \
               -r 30 \
               -c:v libx264 \
@@ -477,9 +952,12 @@ jobs:
       - name: Concatenate clips and add TTS audio
         run: |
           ffmpeg -y \
-            -f concat -safe 0 -i clips/list.txt \
+            -f concat \
+            -safe 0 \
+            -i clips/list.txt \
             -i input/audio.mp3 \
-            -map 0:v -map 1:a \
+            -map 0:v \
+            -map 1:a \
             -vf "ass=input/subtitle.ass" \
             -shortest \
             -c:v libx264 \
