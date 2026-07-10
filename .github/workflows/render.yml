@@ -394,7 +394,7 @@ jobs:
 
           chunks = []
           for s in sentences:
-              chunks.extend(split_korean_chunk(s, max_chars=15))
+              chunks.extend(split_korean_chunk(s, max_chars=20))
 
           chunks = [c.strip() for c in chunks if c.strip()]
 
