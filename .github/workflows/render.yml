@@ -131,7 +131,7 @@ jobs:
               raise Exception("thumbnail_subtitle is empty")
 
           W, H = 1280, 720
-          bg_path = "input/scene1.png"
+          bg_path = "input/scene7.png"
 
           img = Image.open(bg_path).convert("RGB")
           iw, ih = img.size
