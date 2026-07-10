@@ -319,7 +319,7 @@ jobs:
                           result.append(p)
               return result
 
-          def split_korean_chunk(sentence, max_chars=15):
+          def split_korean_chunk(sentence, max_chars=20):
               sentence = sentence.strip()
               if len(sentence) <= max_chars:
                   return [sentence]
