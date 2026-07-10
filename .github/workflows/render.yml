@@ -430,7 +430,7 @@ jobs:
 
               t = 0.0
               for i, c in enumerate(chunks):
-                  start = t + 0.10
+                  start = t + 0.05
                   end = start + durations[i]
                   if i == len(chunks) - 1:
                       end = audio_duration
