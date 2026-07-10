@@ -4,13 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       job_id:
+        description: Unique render job ID
         required: true
+        type: string
       thumbnail_title:
+        description: Thumbnail title text
         required: true
+        type: string
       thumbnail_subtitle:
+        description: Thumbnail subtitle text
         required: true
+        type: string
       voice_script:
+        description: Full narration script used for subtitles
         required: true
+        type: string
 
 permissions:
   contents: write
@@ -18,20 +26,39 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      JOB_ID: ${{ github.event.inputs.job_id }}
+      THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
+      THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
+      VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
 
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-nanum
-          pip install google-api-python-client google-auth pillow
+          python -m pip install --upgrade pip
+          python -m pip install google-api-python-client google-auth pillow
 
-      - name: Prepare folders
+      - name: Prepare folders and service account
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
         run: |
+          set -euo pipefail
           mkdir -p input clips output
-          echo '${{ secrets.GCP_SERVICE_ACCOUNT }}' > service-account.json
+
+          if [ -z "${GCP_SERVICE_ACCOUNT:-}" ]; then
+            echo "GCP_SERVICE_ACCOUNT secret is empty."
+            exit 1
+          fi
+
+          printf '%s' "$GCP_SERVICE_ACCOUNT" > service-account.json
 
       - name: Download images from Google Drive temp
+        env:
+          TEMP_FOLDER_ID: ${{ secrets.TEMP_FOLDER_ID }}
         run: |
           python - <<'PY'
           from google.oauth2 import service_account
@@ -42,28 +69,35 @@ jobs:
           import re
           import time
 
-          JOB_ID = "${{ github.event.inputs.job_id }}"
-          TEMP_FOLDER_ID = "${{ secrets.TEMP_FOLDER_ID }}"
+          JOB_ID = os.environ.get("JOB_ID", "").strip()
+          TEMP_FOLDER_ID = os.environ.get("TEMP_FOLDER_ID", "").strip()
+
           EXPECTED_SCENES = 7
           MAX_ATTEMPTS = 12
           WAIT_SECONDS = 5
-
           SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+          if not JOB_ID:
+              raise Exception("JOB_ID is empty")
+
+          if not TEMP_FOLDER_ID:
+              raise Exception("TEMP_FOLDER_ID secret is empty")
 
           creds = service_account.Credentials.from_service_account_file(
               "service-account.json",
-              scopes=SCOPES
+              scopes=SCOPES,
           )
 
           drive = build("drive", "v3", credentials=creds)
 
+          safe_job_id = JOB_ID.replace("'", "\\'")
           query = (
               f"'{TEMP_FOLDER_ID}' in parents "
               f"and trashed=false "
-              f"and name contains '{JOB_ID}_scene_'"
+              f"and name contains '{safe_job_id}_scene_'"
           )
 
-          def scene_number(name):
+          def scene_number(name: str):
               match = re.search(r"_scene_(\d+)", name)
               return int(match.group(1)) if match else None
 
@@ -73,7 +107,7 @@ jobs:
               results = drive.files().list(
                   q=query,
                   fields="files(id,name,createdTime)",
-                  pageSize=1000
+                  pageSize=1000,
               ).execute()
 
               files = results.get("files", [])
@@ -82,10 +116,7 @@ jobs:
               for file_info in files:
                   number = scene_number(file_info["name"])
 
-                  if number is None:
-                      continue
-
-                  if not 1 <= number <= EXPECTED_SCENES:
+                  if number is None or not 1 <= number <= EXPECTED_SCENES:
                       continue
 
                   if number not in selected:
@@ -99,7 +130,6 @@ jobs:
                       selected[number] = file_info
 
               found_numbers = sorted(selected.keys())
-
               print(
                   f"Attempt {attempt}/{MAX_ATTEMPTS}: "
                   f"found scenes {found_numbers} "
@@ -120,7 +150,6 @@ jobs:
                   f"Missing scenes: {missing}. "
                   f"Waiting {WAIT_SECONDS} seconds..."
               )
-
               time.sleep(WAIT_SECONDS)
 
           if len(selected) != EXPECTED_SCENES:
@@ -129,7 +158,6 @@ jobs:
                   for number in range(1, EXPECTED_SCENES + 1)
                   if number not in selected
               ]
-
               raise Exception(
                   f"Expected {EXPECTED_SCENES} scene images, "
                   f"but found {len(selected)}. "
@@ -143,26 +171,19 @@ jobs:
               file_info = selected[scene_idx]
               output_path = f"input/scene{scene_idx}.png"
 
-              print(
-                  f"Downloading image: "
-                  f"{file_info['name']} -> {output_path}"
-              )
+              print(f"Downloading image: {file_info['name']} -> {output_path}")
 
-              request = drive.files().get_media(
-                  fileId=file_info["id"]
-              )
+              request = drive.files().get_media(fileId=file_info["id"])
 
-              file_handle = io.FileIO(output_path, "wb")
+              with io.FileIO(output_path, "wb") as file_handle:
+                  downloader = MediaIoBaseDownload(file_handle, request)
+                  done = False
 
-              downloader = MediaIoBaseDownload(
-                  file_handle,
-                  request
-              )
+                  while not done:
+                      _, done = downloader.next_chunk()
 
-              done = False
-
-              while not done:
-                  status, done = downloader.next_chunk()
+              if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                  raise Exception(f"Downloaded image is empty: {output_path}")
 
           with open("image_count.txt", "w", encoding="utf-8") as file:
               file.write(str(EXPECTED_SCENES))
@@ -170,27 +191,20 @@ jobs:
           print("Downloaded all 7 scene images successfully.")
           PY
 
-      - name: Create thumbnail image
-        env:
-          THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
-          THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
+      - name: Create thumbnail image from scene 1
         run: |
           python - <<'PY'
+          from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
           import os
           import random
 
-          title = os.environ.get(
-              "THUMBNAIL_TITLE",
-              ""
-          ).strip()
+          title = os.environ.get("THUMBNAIL_TITLE", "").strip()
+          subtitle = os.environ.get("THUMBNAIL_SUBTITLE", "").strip()
+          job_id = os.environ.get("JOB_ID", "").strip()
 
-          subtitle = os.environ.get(
-              "THUMBNAIL_SUBTITLE",
-              ""
-          ).strip()
-
-          job_id = "${{ github.event.inputs.job_id }}"
+          if not job_id:
+              raise Exception("JOB_ID is empty")
 
           if not title:
               raise Exception("thumbnail_title is empty")
@@ -201,68 +215,92 @@ jobs:
           width = 1280
           height = 720
 
-          # 마지막 장면을 썸네일 배경으로 사용
-          background_path = "input/scene7.png"
+          # 첫 번째 장면을 썸네일 배경으로 무조건 사용
+          background_path = Path("input/scene1.png")
+
+          if not background_path.exists():
+              raise FileNotFoundError(
+                  f"First scene image was not found: {background_path}"
+              )
 
           image = Image.open(background_path).convert("RGB")
-
           original_width, original_height = image.size
 
-          scale = max(
-              width / original_width,
-              height / original_height
-          )
+          if original_width <= 0 or original_height <= 0:
+              raise Exception(
+                  f"Invalid scene1 image size: {original_width}x{original_height}"
+              )
 
-          resized_width = int(original_width * scale)
-          resized_height = int(original_height * scale)
+          scale = max(width / original_width, height / original_height)
+          resized_width = max(width, int(round(original_width * scale)))
+          resized_height = max(height, int(round(original_height * scale)))
 
           image = image.resize(
               (resized_width, resized_height),
-              Image.LANCZOS
+              Image.Resampling.LANCZOS,
           )
 
           left = (resized_width - width) // 2
           top = (resized_height - height) // 2
-          right = left + width
-          bottom = top + height
-
-          image = image.crop(
-              (left, top, right, bottom)
-          )
-
+          image = image.crop((left, top, left + width, top + height))
           image = image.convert("RGBA")
 
           warm_overlay = Image.new(
               "RGBA",
               (width, height),
-              (255, 235, 190, 55)
+              (255, 235, 190, 55),
           )
-
-          image = Image.alpha_composite(
-              image,
-              warm_overlay
-          )
-
+          image = Image.alpha_composite(image, warm_overlay)
           draw = ImageDraw.Draw(image)
 
-          title_font_path = (
-              "/usr/share/fonts/truetype/nanum/"
-              "NanumGothicBold.ttf"
-          )
+          def find_font():
+              candidates = [
+                  "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
+                  "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+              ]
 
-          subtitle_font_path = (
-              "/usr/share/fonts/truetype/nanum/"
-              "NanumGothicBold.ttf"
-          )
+              for candidate in candidates:
+                  if Path(candidate).exists():
+                      return candidate
 
-          title_font = ImageFont.truetype(
-              title_font_path,
-              120
+              raise FileNotFoundError(
+                  "No Korean font was found after installing fonts-nanum/fonts and fonts-noto-cjk"
+              )
+
+          font_path = find_font()
+
+          def fit_font(text, initial_size, minimum_size, max_width, stroke_width):
+              size = initial_size
+
+              while size >= minimum_size:
+                  font = ImageFont.truetype(font_path, size)
+                  box = draw.textbbox(
+                      (0, 0),
+                      text,
+                      font=font,
+                      stroke_width=stroke_width,
+                  )
+                  text_width = box[2] - box[0]
+
+                  if text_width <= max_width:
+                      return font
+
+                  size -= 4
+
+              return ImageFont.truetype(font_path, minimum_size)
+
+          title_font = fit_font(
+              text=title,
+              initial_size=120,
+              minimum_size=72,
+              max_width=1160,
+              stroke_width=7,
           )
 
           title_y = 40
           characters = list(title)
-
           character_widths = []
           total_width = 0
 
@@ -271,14 +309,13 @@ jobs:
                   (0, 0),
                   character,
                   font=title_font,
-                  stroke_width=6
+                  stroke_width=7,
               )
-
               character_width = box[2] - box[0]
               character_widths.append(character_width)
               total_width += character_width
 
-          title_x = (width - total_width) // 2
+          title_x = max(20, (width - total_width) // 2)
 
           for index, character in enumerate(characters):
               if index >= max(len(characters) - 2, 0):
@@ -292,80 +329,47 @@ jobs:
                   font=title_font,
                   fill=fill_color,
                   stroke_width=7,
-                  stroke_fill=(247, 229, 190, 255)
+                  stroke_fill=(247, 229, 190, 255),
               )
-
               title_x += character_widths[index]
 
           banner_y = 235
           banner_height = 110
 
+          # 동일 입력은 동일한 배너 형태가 나오도록 고정 시드 사용
+          random.seed(job_id)
+
           for _ in range(22):
               random_y = banner_y + random.randint(-20, 20)
               x1 = 70 + random.randint(-35, 20)
               x2 = width - 70 + random.randint(-20, 35)
-              rectangle_height = (
-                  banner_height + random.randint(-28, 28)
-              )
+              rectangle_height = banner_height + random.randint(-28, 28)
 
               draw.rounded_rectangle(
-                  [
-                      x1,
-                      random_y,
-                      x2,
-                      random_y + rectangle_height
-                  ],
+                  [x1, random_y, x2, random_y + rectangle_height],
                   radius=22,
-                  fill=(20, 15, 10, 230)
+                  fill=(20, 15, 10, 230),
               )
 
           subtitle = subtitle.replace(".", "").strip()
-
-          max_subtitle_width = 1080
-          subtitle_font_size = 68
-
-          while subtitle_font_size >= 58:
-              subtitle_font = ImageFont.truetype(
-                  subtitle_font_path,
-                  subtitle_font_size
-              )
-
-              box = draw.textbbox(
-                  (0, 0),
-                  subtitle,
-                  font=subtitle_font,
-                  stroke_width=5
-              )
-
-              subtitle_width = box[2] - box[0]
-
-              if subtitle_width <= max_subtitle_width:
-                  break
-
-              subtitle_font_size -= 4
-
-          subtitle_font = ImageFont.truetype(
-              subtitle_font_path,
-              subtitle_font_size
+          subtitle_font = fit_font(
+              text=subtitle,
+              initial_size=68,
+              minimum_size=50,
+              max_width=1080,
+              stroke_width=5,
           )
 
           box = draw.textbbox(
               (0, 0),
               subtitle,
               font=subtitle_font,
-              stroke_width=5
+              stroke_width=5,
           )
-
           subtitle_width = box[2] - box[0]
           subtitle_height = box[3] - box[1]
-
-          subtitle_x = (width - subtitle_width) // 2
-
-          subtitle_y = (
-              banner_y
-              + (banner_height - subtitle_height) // 2
-              - 12
-          )
+          subtitle_x = max(25, (width - subtitle_width) // 2)
+          subtitle_y = banner_y + (banner_height - subtitle_height) // 2 - 12
 
           words = subtitle.split(" ", 1)
 
@@ -377,9 +381,8 @@ jobs:
                   (0, 0),
                   first_word,
                   font=subtitle_font,
-                  stroke_width=5
+                  stroke_width=5,
               )
-
               first_width = first_box[2] - first_box[0]
 
               draw.text(
@@ -388,7 +391,7 @@ jobs:
                   font=subtitle_font,
                   fill=(255, 185, 20, 255),
                   stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255)
+                  stroke_fill=(0, 0, 0, 255),
               )
 
               draw.text(
@@ -397,9 +400,8 @@ jobs:
                   font=subtitle_font,
                   fill=(255, 255, 255, 255),
                   stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255)
+                  stroke_fill=(0, 0, 0, 255),
               )
-
           else:
               draw.text(
                   (subtitle_x, subtitle_y),
@@ -407,48 +409,61 @@ jobs:
                   font=subtitle_font,
                   fill=(255, 185, 20, 255),
                   stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255)
+                  stroke_fill=(0, 0, 0, 255),
               )
 
-          output_path = (
-              f"output/thumbnail_{job_id}.jpg"
-          )
+          output_path = Path(f"output/thumbnail_{job_id}.jpg")
+          output_path.parent.mkdir(parents=True, exist_ok=True)
 
           image.convert("RGB").save(
               output_path,
               format="JPEG",
               quality=92,
-              optimize=True
+              optimize=True,
           )
 
-          print(f"Thumbnail created: {output_path}")
+          if not output_path.exists() or output_path.stat().st_size == 0:
+              raise Exception(f"Thumbnail creation failed: {output_path}")
+
+          print(
+              f"Thumbnail created from scene1: {background_path} -> {output_path}"
+          )
           PY
 
       - name: Download TTS audio from Google Drive
+        env:
+          AUDIO_FOLDER_ID: ${{ secrets.AUDIO_FOLDER_ID }}
         run: |
           python - <<'PY'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
           import io
+          import os
           import time
 
-          JOB_ID = "${{ github.event.inputs.job_id }}"
-          AUDIO_FOLDER_ID = "${{ secrets.AUDIO_FOLDER_ID }}"
-
+          JOB_ID = os.environ.get("JOB_ID", "").strip()
+          AUDIO_FOLDER_ID = os.environ.get("AUDIO_FOLDER_ID", "").strip()
           SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+          if not JOB_ID:
+              raise Exception("JOB_ID is empty")
+
+          if not AUDIO_FOLDER_ID:
+              raise Exception("AUDIO_FOLDER_ID secret is empty")
 
           creds = service_account.Credentials.from_service_account_file(
               "service-account.json",
-              scopes=SCOPES
+              scopes=SCOPES,
           )
 
           drive = build("drive", "v3", credentials=creds)
 
+          safe_job_id = JOB_ID.replace("'", "\\'")
           query = (
               f"'{AUDIO_FOLDER_ID}' in parents "
               f"and trashed=false "
-              f"and name contains '{JOB_ID}_voice'"
+              f"and name contains '{safe_job_id}_voice'"
           )
 
           files = []
@@ -457,143 +472,111 @@ jobs:
               results = drive.files().list(
                   q=query,
                   fields="files(id,name,createdTime)",
-                  pageSize=10
+                  pageSize=100,
               ).execute()
 
               files = results.get("files", [])
 
               if files:
+                  files.sort(
+                      key=lambda file_info: file_info.get("createdTime", ""),
+                      reverse=True,
+                  )
                   print(
-                      f"Found audio file on attempt "
-                      f"{attempt}: {files[0]['name']}"
+                      f"Found audio file on attempt {attempt}: {files[0]['name']}"
                   )
                   break
 
               print(
-                  f"No audio file found yet for "
-                  f"job_id={JOB_ID}. Retry {attempt}/6..."
+                  f"No audio file found yet for job_id={JOB_ID}. "
+                  f"Retry {attempt}/6..."
               )
-
               time.sleep(5)
 
           if not files:
-              raise Exception(
-                  f"No audio file found for job_id={JOB_ID}"
-              )
+              raise Exception(f"No audio file found for job_id={JOB_ID}")
 
-          files.sort(
-              key=lambda file_info: file_info.get(
-                  "createdTime",
-                  ""
-              ),
-              reverse=True
-          )
+          file_info = files[0]
+          request = drive.files().get_media(fileId=file_info["id"])
 
-          file_id = files[0]["id"]
+          with io.FileIO("input/audio.mp3", "wb") as file_handle:
+              downloader = MediaIoBaseDownload(file_handle, request)
+              done = False
 
-          request = drive.files().get_media(
-              fileId=file_id
-          )
+              while not done:
+                  _, done = downloader.next_chunk()
 
-          file_handle = io.FileIO(
-              "input/audio.mp3",
-              "wb"
-          )
+          if not os.path.exists("input/audio.mp3") or os.path.getsize("input/audio.mp3") == 0:
+              raise Exception("Downloaded audio file is empty")
 
-          downloader = MediaIoBaseDownload(
-              file_handle,
-              request
-          )
-
-          done = False
-
-          while not done:
-              status, done = downloader.next_chunk()
-
-          print("Downloaded audio as input/audio.mp3")
+          print(f"Downloaded audio: {file_info['name']} -> input/audio.mp3")
           PY
 
       - name: Get audio duration
         run: |
+          set -euo pipefail
+
           AUDIO_DURATION=$(ffprobe \
             -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
             input/audio.mp3)
 
-          echo "$AUDIO_DURATION" > audio_duration.txt
+          if [ -z "$AUDIO_DURATION" ]; then
+            echo "Could not read audio duration."
+            exit 1
+          fi
+
+          python - "$AUDIO_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+
+          if duration <= 0:
+              raise SystemExit("Audio duration must be greater than zero")
+
+          print(f"Validated audio duration: {duration:.3f} seconds")
+          PY
+
+          printf '%s' "$AUDIO_DURATION" > audio_duration.txt
           echo "Audio duration: $AUDIO_DURATION"
 
       - name: Generate subtitle.ass from voice_script
-        env:
-          VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
-          THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
         run: |
           python - <<'PY'
           import os
           import re
 
-          raw_script = os.environ.get(
-              "VOICE_SCRIPT",
-              ""
-          ).strip()
-
-          title_word = os.environ.get(
-              "THUMBNAIL_TITLE",
-              ""
-          ).strip()
+          raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
+          title_word = os.environ.get("THUMBNAIL_TITLE", "").strip()
 
           if not raw_script:
               raise Exception("voice_script input is empty")
 
-          with open(
-              "audio_duration.txt",
-              "r",
-              encoding="utf-8"
-          ) as file:
-              audio_duration = float(
-                  file.read().strip()
-              )
+          with open("audio_duration.txt", "r", encoding="utf-8") as file:
+              audio_duration = float(file.read().strip())
 
           def clean_text(text):
-              text = re.sub(
-                  r"\[\d+\s*-\s*\d+초\]",
-                  "",
-                  text
-              )
-
+              text = re.sub(r"\[\d+\s*-\s*\d+초\]", "", text)
               text = text.replace("\r", "\n")
               text = re.sub(r"\n{2,}", "\n", text)
-
               return text.strip()
 
           def split_sentences(text):
-              lines = [
-                  line.strip()
-                  for line in text.split("\n")
-                  if line.strip()
-              ]
-
+              lines = [line.strip() for line in text.split("\n") if line.strip()]
               result = []
 
               for line in lines:
-                  parts = re.split(
-                      r"(?<=[.!?。！？])\s*",
-                      line
-                  )
+                  parts = re.split(r"(?<=[.!?。！？])\s*", line)
 
                   for part in parts:
                       part = part.strip()
-
                       if part:
                           result.append(part)
 
               return result
 
-          def split_korean_chunk(
-              sentence,
-              max_chars=20
-          ):
+          def split_korean_chunk(sentence, max_chars=20):
               sentence = sentence.strip()
 
               if len(sentence) <= max_chars:
@@ -605,29 +588,21 @@ jobs:
 
               if len(words) > 1:
                   for word in words:
-                      candidate = (
-                          current + " " + word
-                      ).strip()
+                      candidate = (current + " " + word).strip()
 
                       if len(candidate) <= max_chars:
                           current = candidate
                       else:
                           if current:
                               chunks.append(current)
-
                           current = word
 
                   if current:
                       chunks.append(current)
-
               else:
                   chunks = [
                       sentence[index:index + max_chars]
-                      for index in range(
-                          0,
-                          len(sentence),
-                          max_chars
-                      )
+                      for index in range(0, len(sentence), max_chars)
                   ]
 
               final_chunks = []
@@ -637,14 +612,8 @@ jobs:
                       final_chunks.append(chunk)
                   else:
                       final_chunks.extend(
-                          [
-                              chunk[index:index + max_chars]
-                              for index in range(
-                                  0,
-                                  len(chunk),
-                                  max_chars
-                              )
-                          ]
+                          chunk[index:index + max_chars]
+                          for index in range(0, len(chunk), max_chars)
                       )
 
               return final_chunks
@@ -652,14 +621,11 @@ jobs:
           def make_caption_text(chunk):
               chunk = chunk.strip()
 
-              # 16자 이하는 한 줄로 유지
               if len(chunk) <= 16:
                   return chunk
 
               words = chunk.split()
 
-              # 가능한 경우 띄어쓰기 기준으로
-              # 가장 균형 잡힌 두 줄을 선택
               if len(words) >= 2:
                   best_line1 = ""
                   best_line2 = ""
@@ -669,58 +635,26 @@ jobs:
                       line1 = " ".join(words[:index])
                       line2 = " ".join(words[index:])
 
-                      if (
-                          len(line1) <= 16
-                          and len(line2) <= 16
-                      ):
-                          difference = abs(
-                              len(line1) - len(line2)
-                          )
+                      if len(line1) <= 16 and len(line2) <= 16:
+                          difference = abs(len(line1) - len(line2))
 
-                          if (
-                              difference
-                              < smallest_difference
-                          ):
+                          if difference < smallest_difference:
                               smallest_difference = difference
                               best_line1 = line1
                               best_line2 = line2
 
                   if best_line1 and best_line2:
-                      return (
-                          best_line1
-                          + r"\N"
-                          + best_line2
-                      )
+                      return best_line1 + r"\N" + best_line2
 
-              # 띄어쓰기 기준 분할이 불가능하면
-              # 글자 중간을 기준으로 분할
               middle = len(chunk) // 2
-
-              return (
-                  chunk[:middle].strip()
-                  + r"\N"
-                  + chunk[middle:].strip()
-              )
+              return chunk[:middle].strip() + r"\N" + chunk[middle:].strip()
 
           def ass_time(seconds):
               seconds = max(0, float(seconds))
-
               hours = int(seconds // 3600)
-
-              minutes = int(
-                  (seconds % 3600) // 60
-              )
-
+              minutes = int((seconds % 3600) // 60)
               whole_seconds = int(seconds % 60)
-
-              centiseconds = int(
-                  round(
-                      (
-                          seconds
-                          - int(seconds)
-                      ) * 100
-                  )
-              )
+              centiseconds = int(round((seconds - int(seconds)) * 100))
 
               if centiseconds >= 100:
                   whole_seconds += 1
@@ -734,151 +668,82 @@ jobs:
               )
 
           def escape_ass(text):
-              return (
-                  text
-                  .replace("{", "")
-                  .replace("}", "")
-              )
+              return text.replace("{", "").replace("}", "")
 
           def highlight(text):
               if title_word and title_word in text:
                   return text.replace(
                       title_word,
-                      (
-                          r"{\c&H00B9FFFF&}"
-                          + title_word
-                          + r"{\c&H00FFFFFF&}"
-                      )
+                      r"{\c&H00B9FFFF&}" + title_word + r"{\c&H00FFFFFF&}",
                   )
-
               return text
 
           script = clean_text(raw_script)
           sentences = split_sentences(script)
-
           chunks = []
 
           for sentence in sentences:
-              chunks.extend(
-                  split_korean_chunk(
-                      sentence,
-                      max_chars=20
-                  )
-              )
+              chunks.extend(split_korean_chunk(sentence, max_chars=20))
 
-          chunks = [
-              chunk.strip()
-              for chunk in chunks
-              if chunk.strip()
-          ]
+          chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
 
           if not chunks:
-              raise Exception(
-                  "No subtitle chunks generated"
-              )
+              raise Exception("No subtitle chunks generated")
 
           weights = [
-              max(
-                  len(
-                      re.sub(
-                          r"\s+",
-                          "",
-                          chunk
-                      )
-                  ),
-                  4
-              )
+              max(len(re.sub(r"\s+", "", chunk)), 4)
               for chunk in chunks
           ]
 
           total_weight = sum(weights)
-
           minimum_duration = 0.75
           gap = 0.03
-
-          total_gap_duration = (
-              gap * (len(chunks) - 1)
-          )
-
+          total_gap_duration = gap * (len(chunks) - 1)
           usable_duration = max(
               audio_duration - total_gap_duration,
-              len(chunks) * minimum_duration
+              len(chunks) * minimum_duration,
           )
 
           raw_durations = [
-              usable_duration
-              * (weight / total_weight)
+              usable_duration * (weight / total_weight)
               for weight in weights
           ]
-
-          durations = [
-              max(minimum_duration, duration)
-              for duration in raw_durations
-          ]
-
-          calculated_total = (
-              sum(durations)
-              + total_gap_duration
-          )
+          durations = [max(minimum_duration, duration) for duration in raw_durations]
+          calculated_total = sum(durations) + total_gap_duration
 
           if calculated_total > audio_duration:
-              scale = (
-                  audio_duration
-                  / calculated_total
-              )
+              scale = audio_duration / calculated_total
+              durations = [duration * scale for duration in durations]
 
-              durations = [
-                  duration * scale
-                  for duration in durations
-              ]
-
-          with open(
-              "input/subtitle.ass",
-              "w",
-              encoding="utf-8"
-          ) as file:
+          with open("input/subtitle.ass", "w", encoding="utf-8") as file:
               file.write("[Script Info]\n")
               file.write("ScriptType: v4.00+\n")
               file.write("PlayResX: 1080\n")
               file.write("PlayResY: 1920\n\n")
-
               file.write("[V4+ Styles]\n")
-
               file.write(
-                  "Format: Name, Fontname, Fontsize, "
-                  "PrimaryColour, SecondaryColour, "
-                  "OutlineColour, BackColour, Bold, "
-                  "Italic, Underline, StrikeOut, "
-                  "ScaleX, ScaleY, Spacing, Angle, "
-                  "BorderStyle, Outline, Shadow, "
-                  "Alignment, MarginL, MarginR, "
-                  "MarginV, Encoding\n"
+                  "Format: Name, Fontname, Fontsize, PrimaryColour, "
+                  "SecondaryColour, OutlineColour, BackColour, Bold, "
+                  "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, "
+                  "Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
+                  "MarginR, MarginV, Encoding\n"
               )
-
               file.write(
-                  "Style: Default,NanumGothicBold,92,"
-                  "&H00FFFFFF,&H000000FF,&H00000000,"
-                  "&H80000000,1,0,0,0,100,100,0,0,"
-                  "1,7,2,2,70,70,250,1\n\n"
+                  "Style: Default,NanumGothicBold,92,&H00FFFFFF,&H000000FF,"
+                  "&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,7,2,2,"
+                  "70,70,250,1\n\n"
               )
-
               file.write("[Events]\n")
-
               file.write(
-                  "Format: Layer, Start, End, Style, "
-                  "Name, MarginL, MarginR, MarginV, "
-                  "Effect, Text\n"
+                  "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+                  "MarginV, Effect, Text\n"
               )
 
               current_time = 0.0
 
               for index, chunk in enumerate(chunks):
                   start = current_time
-
-                  end = min(
-                      start + durations[index],
-                      audio_duration
-                  )
+                  end = min(start + durations[index], audio_duration)
 
                   if index == len(chunks) - 1:
                       end = audio_duration
@@ -886,17 +751,9 @@ jobs:
                   if end <= start:
                       break
 
-                  caption_text = make_caption_text(
-                      chunk
-                  )
-
-                  caption_text = escape_ass(
-                      caption_text
-                  )
-
-                  caption_text = highlight(
-                      caption_text
-                  )
+                  caption_text = make_caption_text(chunk)
+                  caption_text = escape_ass(caption_text)
+                  caption_text = highlight(caption_text)
 
                   file.write(
                       "Dialogue: 0,"
@@ -912,37 +769,54 @@ jobs:
                       break
 
           print(
-              f"subtitle.ass created: "
-              f"{len(chunks)} captions, "
+              f"subtitle.ass created: {len(chunks)} captions, "
               f"audio_duration={audio_duration}"
           )
           PY
 
       - name: Create image clips
         run: |
+          set -euo pipefail
+
           IMAGE_COUNT=$(cat image_count.txt)
           AUDIO_DURATION=$(cat audio_duration.txt)
 
-          CLIP_DURATION=$(python - <<PY
-          image_count = int("$IMAGE_COUNT")
-          audio_duration = float("$AUDIO_DURATION")
-          print(max(audio_duration / image_count, 3))
+          CLIP_DURATION=$(python - "$IMAGE_COUNT" "$AUDIO_DURATION" <<'PY'
+          import sys
+
+          image_count = int(sys.argv[1])
+          audio_duration = float(sys.argv[2])
+
+          if image_count <= 0:
+              raise SystemExit("IMAGE_COUNT must be greater than zero")
+
+          if audio_duration <= 0:
+              raise SystemExit("AUDIO_DURATION must be greater than zero")
+
+          print(max(audio_duration / image_count, 3.0))
           PY
           )
 
           echo "Image count: $IMAGE_COUNT"
           echo "Clip duration: $CLIP_DURATION"
 
-          > clips/list.txt
+          : > clips/list.txt
 
           for i in $(seq 1 "$IMAGE_COUNT"); do
-            ffmpeg -y \
+            if [ ! -s "input/scene${i}.png" ]; then
+              echo "Missing or empty scene image: input/scene${i}.png"
+              exit 1
+            fi
+
+            ffmpeg -hide_banner -loglevel error -y \
               -loop 1 \
               -t "$CLIP_DURATION" \
               -i "input/scene${i}.png" \
               -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" \
               -r 30 \
               -c:v libx264 \
+              -preset medium \
+              -crf 20 \
               -pix_fmt yuv420p \
               "clips/clip${i}.mp4"
 
@@ -951,25 +825,44 @@ jobs:
 
       - name: Concatenate clips and add TTS audio
         run: |
-          ffmpeg -y \
+          set -euo pipefail
+
+          OUTPUT_VIDEO="output/short_${JOB_ID}.mp4"
+
+          ffmpeg -hide_banner -loglevel error -y \
             -f concat \
             -safe 0 \
             -i clips/list.txt \
             -i input/audio.mp3 \
-            -map 0:v \
-            -map 1:a \
+            -map 0:v:0 \
+            -map 1:a:0 \
             -vf "ass=input/subtitle.ass" \
             -shortest \
             -c:v libx264 \
+            -preset medium \
+            -crf 20 \
             -pix_fmt yuv420p \
             -c:a aac \
-            output/short_${{ github.event.inputs.job_id }}.mp4
+            -b:a 192k \
+            -movflags +faststart \
+            "$OUTPUT_VIDEO"
+
+          if [ ! -s "$OUTPUT_VIDEO" ]; then
+            echo "Rendered video was not created: $OUTPUT_VIDEO"
+            exit 1
+          fi
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 \
+            "$OUTPUT_VIDEO"
 
       - name: Upload mp4 and thumbnail to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: render-${{ github.event.inputs.job_id }}
           name: Render ${{ github.event.inputs.job_id }}
+          fail_on_unmatched_files: true
           files: |
             output/short_${{ github.event.inputs.job_id }}.mp4
             output/thumbnail_${{ github.event.inputs.job_id }}.jpg
