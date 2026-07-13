@@ -1,1 +1,50 @@
+name: Cleanup old render releases
 
+on:
+  workflow_dispatch:
+  schedule:
+    # 매일 한국시간 새벽 4시 실행
+    # GitHub cron은 UTC 기준이므로 19:00 UTC = 다음 날 04:00 KST
+    - cron: "0 19 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete render releases older than 3 days
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CUTOFF="$(date -u -d '3 days ago' +%s)"
+
+          gh api \
+            --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | [.tag_name, .created_at] | @tsv' |
+          while IFS=$'\t' read -r TAG CREATED_AT; do
+            # render- 로 시작하는 자동 생성 Release만 삭제
+            if [[ "$TAG" != render-* ]]; then
+              continue
+            fi
+
+            CREATED_TIMESTAMP="$(date -u -d "$CREATED_AT" +%s)"
+
+            if (( CREATED_TIMESTAMP < CUTOFF )); then
+              echo "Deleting release and tag: $TAG ($CREATED_AT)"
+              gh release delete "$TAG" \
+                --repo "$REPOSITORY" \
+                --cleanup-tag \
+                --yes
+            else
+              echo "Keeping: $TAG ($CREATED_AT)"
+            fi
+          done
