@@ -35,6 +35,9 @@ jobs:
       VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -541,6 +544,39 @@ jobs:
           printf '%s' "$AUDIO_DURATION" > audio_duration.txt
           echo "Audio duration: $AUDIO_DURATION"
 
+      - name: Validate BGM file
+        run: |
+          set -euo pipefail
+
+          BGM_PATH="assets/bgm.mp3"
+
+          if [ ! -s "$BGM_PATH" ]; then
+            echo "BGM file was not found or is empty: $BGM_PATH"
+            exit 1
+          fi
+
+          BGM_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$BGM_PATH")
+
+          if [ -z "$BGM_DURATION" ]; then
+            echo "Could not read BGM duration: $BGM_PATH"
+            exit 1
+          fi
+
+          python - "$BGM_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+
+          if duration <= 0:
+              raise SystemExit("BGM duration must be greater than zero")
+
+          print(f"Validated BGM duration: {duration:.3f} seconds")
+          PY
+
       - name: Generate subtitle.ass from voice_script
         run: |
           python - <<'PY'
@@ -823,21 +859,54 @@ jobs:
             echo "file 'clip${i}.mp4'" >> clips/list.txt
           done
 
-      - name: Concatenate clips and add TTS audio
+      - name: Concatenate clips and add TTS and BGM
         run: |
           set -euo pipefail
 
           OUTPUT_VIDEO="output/short_${JOB_ID}.mp4"
+          AUDIO_DURATION=$(cat audio_duration.txt)
+
+          FADE_OUT_DURATION=$(python - "$AUDIO_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+          print(min(2.0, max(duration, 0.0)))
+          PY
+          )
+
+          FADE_OUT_START=$(python - "$AUDIO_DURATION" "$FADE_OUT_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+          fade_duration = float(sys.argv[2])
+          print(max(duration - fade_duration, 0.0))
+          PY
+          )
+
+          echo "Narration duration: $AUDIO_DURATION"
+          echo "BGM fade-out start: $FADE_OUT_START"
+          echo "BGM fade-out duration: $FADE_OUT_DURATION"
+          echo "BGM volume: 0.07"
 
           ffmpeg -hide_banner -loglevel error -y \
             -f concat \
             -safe 0 \
             -i clips/list.txt \
             -i input/audio.mp3 \
-            -map 0:v:0 \
-            -map 1:a:0 \
-            -vf "ass=input/subtitle.ass" \
-            -shortest \
+            -stream_loop -1 \
+            -i assets/bgm.mp3 \
+            -filter_complex "\
+              [0:v:0]ass=input/subtitle.ass[vout];\
+              [1:a:0]aresample=async=1:first_pts=0,volume=1.0[voice];\
+              [2:a:0]atrim=0:${AUDIO_DURATION},asetpts=PTS-STARTPTS,\
+              aresample=async=1:first_pts=0,volume=0.07,\
+              afade=t=in:st=0:d=1,\
+              afade=t=out:st=${FADE_OUT_START}:d=${FADE_OUT_DURATION}[bgm];\
+              [voice][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,\
+              alimiter=limit=0.95[aout]" \
+            -map "[vout]" \
+            -map "[aout]" \
+            -t "$AUDIO_DURATION" \
             -c:v libx264 \
             -preset medium \
             -crf 20 \
