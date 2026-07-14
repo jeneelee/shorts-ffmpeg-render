@@ -33,6 +33,7 @@ jobs:
       THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
       THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
       VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
+      END_PADDING_SECONDS: "1.2"
 
     steps:
       - name: Checkout repository
@@ -515,7 +516,7 @@ jobs:
           print(f"Downloaded audio: {file_info['name']} -> input/audio.mp3")
           PY
 
-      - name: Get audio duration
+      - name: Get audio and final video duration
         run: |
           set -euo pipefail
 
@@ -530,19 +531,28 @@ jobs:
             exit 1
           fi
 
-          python - "$AUDIO_DURATION" <<'PY'
+          VIDEO_DURATION=$(python - "$AUDIO_DURATION" "$END_PADDING_SECONDS" <<'PY'
           import sys
 
-          duration = float(sys.argv[1])
+          audio_duration = float(sys.argv[1])
+          end_padding = float(sys.argv[2])
 
-          if duration <= 0:
+          if audio_duration <= 0:
               raise SystemExit("Audio duration must be greater than zero")
 
-          print(f"Validated audio duration: {duration:.3f} seconds")
+          if end_padding < 0:
+              raise SystemExit("END_PADDING_SECONDS must not be negative")
+
+          print(f"{audio_duration + end_padding:.6f}")
           PY
+          )
 
           printf '%s' "$AUDIO_DURATION" > audio_duration.txt
-          echo "Audio duration: $AUDIO_DURATION"
+          printf '%s' "$VIDEO_DURATION" > video_duration.txt
+
+          echo "Narration duration: $AUDIO_DURATION"
+          echo "End padding: $END_PADDING_SECONDS"
+          echo "Final video duration: $VIDEO_DURATION"
 
       - name: Validate BGM file
         run: |
@@ -591,6 +601,9 @@ jobs:
 
           with open("audio_duration.txt", "r", encoding="utf-8") as file:
               audio_duration = float(file.read().strip())
+
+          with open("video_duration.txt", "r", encoding="utf-8") as file:
+              video_duration = float(file.read().strip())
 
           def clean_text(text):
               text = re.sub(r"\[\d+\s*-\s*\d+초\]", "", text)
@@ -782,7 +795,9 @@ jobs:
                   end = min(start + durations[index], audio_duration)
 
                   if index == len(chunks) - 1:
-                      end = audio_duration
+                      # 마지막 핵심 문구가 영상 종료와 동시에 잘리지 않도록
+                      # 영상의 여유 구간까지 자막을 유지합니다.
+                      end = video_duration
 
                   if end <= start:
                       break
@@ -806,7 +821,8 @@ jobs:
 
           print(
               f"subtitle.ass created: {len(chunks)} captions, "
-              f"audio_duration={audio_duration}"
+              f"audio_duration={audio_duration}, "
+              f"video_duration={video_duration}"
           )
           PY
 
@@ -815,21 +831,21 @@ jobs:
           set -euo pipefail
 
           IMAGE_COUNT=$(cat image_count.txt)
-          AUDIO_DURATION=$(cat audio_duration.txt)
+          VIDEO_DURATION=$(cat video_duration.txt)
 
-          CLIP_DURATION=$(python - "$IMAGE_COUNT" "$AUDIO_DURATION" <<'PY'
+          CLIP_DURATION=$(python - "$IMAGE_COUNT" "$VIDEO_DURATION" <<'PY'
           import sys
 
           image_count = int(sys.argv[1])
-          audio_duration = float(sys.argv[2])
+          video_duration = float(sys.argv[2])
 
           if image_count <= 0:
               raise SystemExit("IMAGE_COUNT must be greater than zero")
 
-          if audio_duration <= 0:
-              raise SystemExit("AUDIO_DURATION must be greater than zero")
+          if video_duration <= 0:
+              raise SystemExit("VIDEO_DURATION must be greater than zero")
 
-          print(max(audio_duration / image_count, 3.0))
+          print(max(video_duration / image_count, 3.0))
           PY
           )
 
@@ -865,8 +881,9 @@ jobs:
 
           OUTPUT_VIDEO="output/short_${JOB_ID}.mp4"
           AUDIO_DURATION=$(cat audio_duration.txt)
+          VIDEO_DURATION=$(cat video_duration.txt)
 
-          FADE_OUT_DURATION=$(python - "$AUDIO_DURATION" <<'PY'
+          FADE_OUT_DURATION=$(python - "$VIDEO_DURATION" <<'PY'
           import sys
 
           duration = float(sys.argv[1])
@@ -874,7 +891,7 @@ jobs:
           PY
           )
 
-          FADE_OUT_START=$(python - "$AUDIO_DURATION" "$FADE_OUT_DURATION" <<'PY'
+          FADE_OUT_START=$(python - "$VIDEO_DURATION" "$FADE_OUT_DURATION" <<'PY'
           import sys
 
           duration = float(sys.argv[1])
@@ -884,6 +901,7 @@ jobs:
           )
 
           echo "Narration duration: $AUDIO_DURATION"
+          echo "Final video duration: $VIDEO_DURATION"
           echo "BGM fade-out start: $FADE_OUT_START"
           echo "BGM fade-out duration: $FADE_OUT_DURATION"
           echo "BGM volume: 0.07"
@@ -897,16 +915,17 @@ jobs:
             -i assets/bgm.mp3 \
             -filter_complex "\
               [0:v:0]ass=input/subtitle.ass[vout];\
-              [1:a:0]aresample=async=1:first_pts=0,volume=1.0[voice];\
-              [2:a:0]atrim=0:${AUDIO_DURATION},asetpts=PTS-STARTPTS,\
+              [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
+              apad=pad_dur=${END_PADDING_SECONDS}[voice];\
+              [2:a:0]atrim=0:${VIDEO_DURATION},asetpts=PTS-STARTPTS,\
               aresample=async=1:first_pts=0,volume=0.07,\
               afade=t=in:st=0:d=1,\
               afade=t=out:st=${FADE_OUT_START}:d=${FADE_OUT_DURATION}[bgm];\
-              [voice][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,\
+              [voice][bgm]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,\
               alimiter=limit=0.95[aout]" \
             -map "[vout]" \
             -map "[aout]" \
-            -t "$AUDIO_DURATION" \
+            -t "$VIDEO_DURATION" \
             -c:v libx264 \
             -preset medium \
             -crf 20 \
@@ -920,6 +939,31 @@ jobs:
             echo "Rendered video was not created: $OUTPUT_VIDEO"
             exit 1
           fi
+
+          RENDERED_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$OUTPUT_VIDEO")
+
+          python - "$VIDEO_DURATION" "$RENDERED_DURATION" <<'PY'
+          import sys
+
+          expected = float(sys.argv[1])
+          actual = float(sys.argv[2])
+          tolerance = 0.20
+
+          if actual + tolerance < expected:
+              raise SystemExit(
+                  f"Rendered video is too short: expected about {expected:.3f}s, "
+                  f"got {actual:.3f}s"
+              )
+
+          print(
+              f"Validated rendered duration: {actual:.3f}s "
+              f"(target {expected:.3f}s)"
+          )
+          PY
 
           ffprobe -v error \
             -show_entries format=duration,size \
