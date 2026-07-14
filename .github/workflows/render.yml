@@ -33,7 +33,7 @@ jobs:
       THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
       THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
       VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
-      END_PADDING_SECONDS: "1.5"
+      END_PADDING_SECONDS: "1.2"
 
     steps:
       - name: Checkout repository
