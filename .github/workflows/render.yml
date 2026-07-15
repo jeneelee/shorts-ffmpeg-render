@@ -7,14 +7,6 @@ on:
         description: Unique render job ID
         required: true
         type: string
-      thumbnail_title:
-        description: Thumbnail title text
-        required: true
-        type: string
-      thumbnail_subtitle:
-        description: Thumbnail subtitle text
-        required: true
-        type: string
       voice_script:
         description: Full narration script used for subtitles
         required: true
@@ -30,8 +22,6 @@ jobs:
 
     env:
       JOB_ID: ${{ github.event.inputs.job_id }}
-      THUMBNAIL_TITLE: ${{ github.event.inputs.thumbnail_title }}
-      THUMBNAIL_SUBTITLE: ${{ github.event.inputs.thumbnail_subtitle }}
       VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
       END_PADDING_SECONDS: "1.2"
 
@@ -44,7 +34,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-nanum
           python -m pip install --upgrade pip
-          python -m pip install google-api-python-client google-auth pillow
+          python -m pip install google-api-python-client google-auth
 
       - name: Prepare folders and service account
         env:
@@ -193,245 +183,6 @@ jobs:
               file.write(str(EXPECTED_SCENES))
 
           print("Downloaded all 7 scene images successfully.")
-          PY
-
-      - name: Create thumbnail image from scene 1
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          from PIL import Image, ImageDraw, ImageFont
-          import os
-          import random
-
-          title = os.environ.get("THUMBNAIL_TITLE", "").strip()
-          subtitle = os.environ.get("THUMBNAIL_SUBTITLE", "").strip()
-          job_id = os.environ.get("JOB_ID", "").strip()
-
-          if not job_id:
-              raise Exception("JOB_ID is empty")
-
-          if not title:
-              raise Exception("thumbnail_title is empty")
-
-          if not subtitle:
-              raise Exception("thumbnail_subtitle is empty")
-
-          width = 1280
-          height = 720
-
-          # 첫 번째 장면을 썸네일 배경으로 무조건 사용
-          background_path = Path("input/scene1.png")
-
-          if not background_path.exists():
-              raise FileNotFoundError(
-                  f"First scene image was not found: {background_path}"
-              )
-
-          image = Image.open(background_path).convert("RGB")
-          original_width, original_height = image.size
-
-          if original_width <= 0 or original_height <= 0:
-              raise Exception(
-                  f"Invalid scene1 image size: {original_width}x{original_height}"
-              )
-
-          scale = max(width / original_width, height / original_height)
-          resized_width = max(width, int(round(original_width * scale)))
-          resized_height = max(height, int(round(original_height * scale)))
-
-          image = image.resize(
-              (resized_width, resized_height),
-              Image.Resampling.LANCZOS,
-          )
-
-          left = (resized_width - width) // 2
-          top = (resized_height - height) // 2
-          image = image.crop((left, top, left + width, top + height))
-          image = image.convert("RGBA")
-
-          warm_overlay = Image.new(
-              "RGBA",
-              (width, height),
-              (255, 235, 190, 55),
-          )
-          image = Image.alpha_composite(image, warm_overlay)
-          draw = ImageDraw.Draw(image)
-
-          def find_font():
-              candidates = [
-                  "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
-                  "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-              ]
-
-              for candidate in candidates:
-                  if Path(candidate).exists():
-                      return candidate
-
-              raise FileNotFoundError(
-                  "No Korean font was found after installing fonts-nanum/fonts and fonts-noto-cjk"
-              )
-
-          font_path = find_font()
-
-          def fit_font(text, initial_size, minimum_size, max_width, stroke_width):
-              size = initial_size
-
-              while size >= minimum_size:
-                  font = ImageFont.truetype(font_path, size)
-                  box = draw.textbbox(
-                      (0, 0),
-                      text,
-                      font=font,
-                      stroke_width=stroke_width,
-                  )
-                  text_width = box[2] - box[0]
-
-                  if text_width <= max_width:
-                      return font
-
-                  size -= 4
-
-              return ImageFont.truetype(font_path, minimum_size)
-
-          title_font = fit_font(
-              text=title,
-              initial_size=120,
-              minimum_size=72,
-              max_width=1160,
-              stroke_width=7,
-          )
-
-          title_y = 40
-          characters = list(title)
-          character_widths = []
-          total_width = 0
-
-          for character in characters:
-              box = draw.textbbox(
-                  (0, 0),
-                  character,
-                  font=title_font,
-                  stroke_width=7,
-              )
-              character_width = box[2] - box[0]
-              character_widths.append(character_width)
-              total_width += character_width
-
-          title_x = max(20, (width - total_width) // 2)
-
-          for index, character in enumerate(characters):
-              if index >= max(len(characters) - 2, 0):
-                  fill_color = (220, 42, 25, 255)
-              else:
-                  fill_color = (20, 15, 10, 255)
-
-              draw.text(
-                  (title_x, title_y),
-                  character,
-                  font=title_font,
-                  fill=fill_color,
-                  stroke_width=7,
-                  stroke_fill=(247, 229, 190, 255),
-              )
-              title_x += character_widths[index]
-
-          banner_y = 235
-          banner_height = 110
-
-          # 동일 입력은 동일한 배너 형태가 나오도록 고정 시드 사용
-          random.seed(job_id)
-
-          for _ in range(22):
-              random_y = banner_y + random.randint(-20, 20)
-              x1 = 70 + random.randint(-35, 20)
-              x2 = width - 70 + random.randint(-20, 35)
-              rectangle_height = banner_height + random.randint(-28, 28)
-
-              draw.rounded_rectangle(
-                  [x1, random_y, x2, random_y + rectangle_height],
-                  radius=22,
-                  fill=(20, 15, 10, 230),
-              )
-
-          subtitle = subtitle.replace(".", "").strip()
-          subtitle_font = fit_font(
-              text=subtitle,
-              initial_size=68,
-              minimum_size=50,
-              max_width=1080,
-              stroke_width=5,
-          )
-
-          box = draw.textbbox(
-              (0, 0),
-              subtitle,
-              font=subtitle_font,
-              stroke_width=5,
-          )
-          subtitle_width = box[2] - box[0]
-          subtitle_height = box[3] - box[1]
-          subtitle_x = max(25, (width - subtitle_width) // 2)
-          subtitle_y = banner_y + (banner_height - subtitle_height) // 2 - 12
-
-          words = subtitle.split(" ", 1)
-
-          if len(words) == 2:
-              first_word = words[0] + " "
-              remaining_text = words[1]
-
-              first_box = draw.textbbox(
-                  (0, 0),
-                  first_word,
-                  font=subtitle_font,
-                  stroke_width=5,
-              )
-              first_width = first_box[2] - first_box[0]
-
-              draw.text(
-                  (subtitle_x, subtitle_y),
-                  first_word,
-                  font=subtitle_font,
-                  fill=(255, 185, 20, 255),
-                  stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255),
-              )
-
-              draw.text(
-                  (subtitle_x + first_width, subtitle_y),
-                  remaining_text,
-                  font=subtitle_font,
-                  fill=(255, 255, 255, 255),
-                  stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255),
-              )
-          else:
-              draw.text(
-                  (subtitle_x, subtitle_y),
-                  subtitle,
-                  font=subtitle_font,
-                  fill=(255, 185, 20, 255),
-                  stroke_width=5,
-                  stroke_fill=(0, 0, 0, 255),
-              )
-
-          output_path = Path(f"output/thumbnail_{job_id}.jpg")
-          output_path.parent.mkdir(parents=True, exist_ok=True)
-
-          image.convert("RGB").save(
-              output_path,
-              format="JPEG",
-              quality=92,
-              optimize=True,
-          )
-
-          if not output_path.exists() or output_path.stat().st_size == 0:
-              raise Exception(f"Thumbnail creation failed: {output_path}")
-
-          print(
-              f"Thumbnail created from scene1: {background_path} -> {output_path}"
-          )
           PY
 
       - name: Download TTS audio from Google Drive
@@ -594,8 +345,6 @@ jobs:
           import re
 
           raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
-          title_word = os.environ.get("THUMBNAIL_TITLE", "").strip()
-
           if not raw_script:
               raise Exception("voice_script input is empty")
 
@@ -719,14 +468,6 @@ jobs:
           def escape_ass(text):
               return text.replace("{", "").replace("}", "")
 
-          def highlight(text):
-              if title_word and title_word in text:
-                  return text.replace(
-                      title_word,
-                      r"{\c&H00B9FFFF&}" + title_word + r"{\c&H00FFFFFF&}",
-                  )
-              return text
-
           script = clean_text(raw_script)
           sentences = split_sentences(script)
           chunks = []
@@ -804,7 +545,6 @@ jobs:
 
                   caption_text = make_caption_text(chunk)
                   caption_text = escape_ass(caption_text)
-                  caption_text = highlight(caption_text)
 
                   file.write(
                       "Dialogue: 0,"
@@ -970,7 +710,7 @@ jobs:
             -of default=noprint_wrappers=1 \
             "$OUTPUT_VIDEO"
 
-      - name: Upload mp4 and thumbnail to GitHub Release
+      - name: Upload mp4 to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: render-${{ github.event.inputs.job_id }}
@@ -978,6 +718,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             output/short_${{ github.event.inputs.job_id }}.mp4
-            output/thumbnail_${{ github.event.inputs.job_id }}.jpg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
