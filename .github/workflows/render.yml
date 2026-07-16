@@ -7,6 +7,14 @@ on:
         description: Unique render job ID
         required: true
         type: string
+      overlay_title:
+        description: Idiom and Chinese characters shown at the top
+        required: true
+        type: string
+      overlay_meaning:
+        description: Short idiom meaning shown below the title
+        required: true
+        type: string
       voice_script:
         description: Full narration script used for subtitles
         required: true
@@ -22,6 +30,8 @@ jobs:
 
     env:
       JOB_ID: ${{ github.event.inputs.job_id }}
+      OVERLAY_TITLE: ${{ github.event.inputs.overlay_title }}
+      OVERLAY_MEANING: ${{ github.event.inputs.overlay_meaning }}
       VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
       END_PADDING_SECONDS: "1.2"
 
@@ -345,8 +355,17 @@ jobs:
           import re
 
           raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
+          overlay_title = os.environ.get("OVERLAY_TITLE", "").strip()
+          overlay_meaning = os.environ.get("OVERLAY_MEANING", "").strip()
+
           if not raw_script:
               raise Exception("voice_script input is empty")
+
+          if not overlay_title:
+              raise Exception("overlay_title input is empty")
+
+          if not overlay_meaning:
+              raise Exception("overlay_meaning input is empty")
 
           with open("audio_duration.txt", "r", encoding="utf-8") as file:
               audio_duration = float(file.read().strip())
@@ -466,7 +485,41 @@ jobs:
               )
 
           def escape_ass(text):
-              return text.replace("{", "").replace("}", "")
+              return (
+                  text.replace("\\", r"\\")
+                  .replace("{", "")
+                  .replace("}", "")
+              )
+
+          def fit_top_text(text, max_chars=22):
+              text = re.sub(r"\s+", " ", text).strip()
+
+              if len(text) <= max_chars:
+                  return text
+
+              words = text.split()
+
+              if len(words) > 1:
+                  lines = []
+                  current = ""
+
+                  for word in words:
+                      candidate = (current + " " + word).strip()
+
+                      if len(candidate) <= max_chars:
+                          current = candidate
+                      else:
+                          if current:
+                              lines.append(current)
+                          current = word
+
+                  if current:
+                      lines.append(current)
+
+                  return r"\N".join(lines[:2])
+
+              middle = len(text) // 2
+              return text[:middle] + r"\N" + text[middle:]
 
           script = clean_text(raw_script)
           sentences = split_sentences(script)
@@ -521,12 +574,40 @@ jobs:
               file.write(
                   "Style: Default,NanumGothicBold,92,&H00FFFFFF,&H000000FF,"
                   "&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,7,2,2,"
-                  "70,70,250,1\n\n"
+                  "70,70,250,1\n"
+              )
+              file.write(
+                  "Style: TopTitle,NanumGothicBold,76,&H00101010,&H000000FF,"
+                  "&H00F4E7CF,&H00000000,1,0,0,0,100,100,0,0,1,5,0,8,"
+                  "60,60,95,1\n"
+              )
+              file.write(
+                  "Style: TopMeaning,NanumGothicBold,46,&H00323232,&H000000FF,"
+                  "&H00F4E7CF,&H00000000,1,0,0,0,100,100,0,0,1,4,0,8,"
+                  "80,80,195,1\n\n"
               )
               file.write("[Events]\n")
               file.write(
                   "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
                   "MarginV, Effect, Text\n"
+              )
+
+              title_text = escape_ass(fit_top_text(overlay_title, max_chars=18))
+              meaning_text = escape_ass(fit_top_text(overlay_meaning, max_chars=24))
+
+              file.write(
+                  "Dialogue: 1,"
+                  f"{ass_time(0)},"
+                  f"{ass_time(video_duration)},"
+                  "TopTitle,,0,0,0,,"
+                  f"{title_text}\n"
+              )
+              file.write(
+                  "Dialogue: 1,"
+                  f"{ass_time(0)},"
+                  f"{ass_time(video_duration)},"
+                  "TopMeaning,,0,0,0,,"
+                  f"{meaning_text}\n"
               )
 
               current_time = 0.0
