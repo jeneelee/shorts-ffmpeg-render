@@ -54,6 +54,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Confirm workflow inputs
+        run: |
+          echo "JOB_ID=${JOB_ID}"
+          echo "OVERLAY_TITLE=${OVERLAY_TITLE}"
+          echo "DIFFICULTY=${DIFFICULTY}"
+          echo "USAGE_FREQUENCY=${USAGE_FREQUENCY}"
+          echo "KOREAN_HISTORY=${KOREAN_HISTORY}"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -871,9 +879,7 @@ jobs:
               file.write(
                   "Style: Default,Noto Sans CJK KR,78,&H00FFFFFF,&H000000FF,"
                   "&H00000000,&H60000000,1,0,0,0,100,100,-1,0,1,5,3,2,"
-                  "85,85,220,1
-
-"
+                  "85,85,220,1\n\n"
               )
               file.write("[Events]\n")
               file.write(
