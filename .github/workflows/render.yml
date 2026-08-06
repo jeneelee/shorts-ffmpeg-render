@@ -54,6 +54,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate and register repository fonts
+        run: |
+          set -euo pipefail
+
+          REQUIRED_FONTS=(
+            "fonts/NanumBrush.ttf"
+            "fonts/NanumMyeongjoBold.ttf"
+            "fonts/NanumGothicBold.ttf"
+          )
+
+          for font_file in "${REQUIRED_FONTS[@]}"; do
+            if [ ! -s "$font_file" ]; then
+              echo "Required font is missing or empty: $font_file"
+              exit 1
+            fi
+          done
+
+          mkdir -p "$HOME/.local/share/fonts/gangnamhakdang"
+          cp fonts/NanumBrush.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+          cp fonts/NanumMyeongjoBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+          cp fonts/NanumGothicBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+
+          fc-cache -f -v
+
+          echo "Registered repository fonts:"
+          fc-match "Nanum Brush Script"
+          fc-match "NanumMyeongjo"
+          fc-match "NanumGothic"
+
       - name: Confirm workflow inputs
         run: |
           echo "JOB_ID=${JOB_ID}"
@@ -65,7 +94,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-nanum fonts-nanum-extra
+          sudo apt-get install -y ffmpeg fontconfig
           python -m pip install --upgrade pip
           python -m pip install google-api-python-client google-auth pillow
 
@@ -378,7 +407,6 @@ jobs:
           from pathlib import Path
           import os
           import re
-          import subprocess
 
           overlay_title = os.environ.get("OVERLAY_TITLE", "").strip()
           overlay_meaning = os.environ.get("OVERLAY_MEANING", "").strip()
@@ -391,6 +419,21 @@ jobs:
           if not overlay_meaning:
               raise Exception("OVERLAY_MEANING is empty")
 
+          FONT_DIR = Path("fonts")
+          BRUSH_FONT = FONT_DIR / "NanumBrush.ttf"
+          MYEONGJO_FONT = FONT_DIR / "NanumMyeongjoBold.ttf"
+          GOTHIC_FONT = FONT_DIR / "NanumGothicBold.ttf"
+
+          for font_path in (BRUSH_FONT, MYEONGJO_FONT, GOTHIC_FONT):
+              if not font_path.is_file() or font_path.stat().st_size == 0:
+                  raise FileNotFoundError(
+                      f"Required repository font is missing or empty: {font_path}"
+                  )
+
+          brush_font_path = str(BRUSH_FONT)
+          myeongjo_font_path = str(MYEONGJO_FONT)
+          gothic_font_path = str(GOTHIC_FONT)
+
           allowed_ratings = {"★☆☆", "★★☆", "★★★", "☆☆☆"}
 
           def normalize_rating(value, default):
@@ -401,76 +444,6 @@ jobs:
           usage_frequency = normalize_rating(usage_frequency, "★☆☆")
           korean_history = normalize_rating(korean_history, "☆☆☆")
 
-          def first_existing(patterns):
-              for pattern in patterns:
-                  matches = sorted(Path("/").glob(pattern.lstrip("/")))
-                  for path in matches:
-                      if path.is_file() and path.stat().st_size > 0:
-                          return str(path)
-              return ""
-
-          def fc_match(family):
-              try:
-                  path = subprocess.check_output(
-                      ["fc-match", "-f", "%{file}", family],
-                      text=True,
-                  ).strip()
-                  if path and os.path.exists(path):
-                      return path
-              except Exception:
-                  pass
-              return ""
-
-          # 붓글씨는 한국어 사자성어 제목에만 사용합니다.
-          # 한자·뜻·카드·자막은 문자 범위가 넓은 Noto CJK 계열로 고정해
-          # 네모(□) 깨짐을 방지합니다.
-          brush_font_path = (
-              first_existing([
-                  "/usr/share/fonts/truetype/nanum/*Brush*.ttf",
-                  "/usr/share/fonts/opentype/nanum/*Brush*.ttf",
-                  "/usr/share/fonts/**/*NanumBrush*.ttf",
-              ])
-              or fc_match("Nanum Brush Script")
-              or fc_match("NanumBrush")
-          )
-
-          serif_font_path = (
-              first_existing([
-                  "/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc",
-                  "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-                  "/usr/share/fonts/truetype/nanum/NanumMyeongjoBold.ttf",
-              ])
-              or fc_match("Noto Serif CJK KR")
-              or fc_match("NanumMyeongjo")
-          )
-
-          gothic_font_path = (
-              first_existing([
-                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-                  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                  "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
-              ])
-              or fc_match("Noto Sans CJK KR")
-              or fc_match("NanumGothic")
-          )
-
-          if not brush_font_path:
-              # 붓글씨 폰트가 없더라도 작업이 멈추지 않도록 명조체로 대체합니다.
-              brush_font_path = serif_font_path
-
-          if not brush_font_path or not serif_font_path or not gothic_font_path:
-              raise FileNotFoundError(
-                  "Required Korean fonts were not found. "
-                  f"brush={brush_font_path}, "
-                  f"serif={serif_font_path}, "
-                  f"gothic={gothic_font_path}"
-              )
-
-          print(f"Brush font: {brush_font_path}")
-          print(f"Serif font: {serif_font_path}")
-          print(f"Gothic font: {gothic_font_path}")
-
-          # overlay_title 예시: 권토중래 (捲土重來)
           title_match = re.match(
               r"^\s*(.*?)\s*[\(\（]\s*(.*?)\s*[\)\）]\s*$",
               overlay_title,
@@ -500,49 +473,27 @@ jobs:
 
           os.makedirs("input", exist_ok=True)
 
-          # ----------------------------------------------------------
-          # 상단 타이틀 오버레이
-          # ----------------------------------------------------------
           title_width = 1080
           title_height = 430
-          title_layer = Image.new(
-              "RGBA",
-              (title_width, title_height),
-              (0, 0, 0, 0),
-          )
+          title_layer = Image.new("RGBA", (title_width, title_height), (0, 0, 0, 0))
           title_draw = ImageDraw.Draw(title_layer)
 
-          ink = (24, 20, 17, 255)
-          soft_ink = (50, 43, 37, 255)
-          warm_outline = (245, 232, 207, 205)
+          ink = (34, 28, 24, 255)
+          hanja_brown = (105, 74, 43, 255)
+          meaning_ink = (48, 38, 30, 255)
+          warm_outline = (255, 248, 234, 225)
 
           idiom_font = fit_font(
-              title_draw,
-              idiom,
-              brush_font_path,
-              max_size=126,
-              min_size=82,
-              max_width=920,
+              title_draw, idiom, brush_font_path, 132, 88, 920
           )
           hanja_text = f"({hanja})" if hanja else ""
           hanja_font = fit_font(
-              title_draw,
-              hanja_text,
-              serif_font_path,
-              max_size=64,
-              min_size=46,
-              max_width=760,
+              title_draw, hanja_text, myeongjo_font_path, 66, 48, 760
           )
           meaning_font = fit_font(
-              title_draw,
-              overlay_meaning,
-              serif_font_path,
-              max_size=48,
-              min_size=38,
-              max_width=850,
+              title_draw, overlay_meaning, brush_font_path, 54, 42, 880
           )
 
-          # 제목에만 은은한 먹 번짐 효과
           shadow = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
           shadow_draw = ImageDraw.Draw(shadow)
           idiom_x = centered_x(title_draw, idiom, idiom_font, title_width)
@@ -550,9 +501,9 @@ jobs:
               (idiom_x + 2, 55),
               idiom,
               font=idiom_font,
-              fill=(0, 0, 0, 65),
+              fill=(0, 0, 0, 72),
           )
-          shadow = shadow.filter(ImageFilter.GaussianBlur(1.3))
+          shadow = shadow.filter(ImageFilter.GaussianBlur(1.4))
           title_layer.alpha_composite(shadow)
 
           title_draw = ImageDraw.Draw(title_layer)
@@ -561,48 +512,37 @@ jobs:
               idiom,
               font=idiom_font,
               fill=ink,
-              stroke_width=1,
+              stroke_width=2,
               stroke_fill=warm_outline,
           )
 
           current_y = 192
           if hanja_text:
-              hanja_x = centered_x(
-                  title_draw,
-                  hanja_text,
-                  hanja_font,
-                  title_width,
-              )
+              hanja_x = centered_x(title_draw, hanja_text, hanja_font, title_width)
               title_draw.text(
                   (hanja_x, current_y),
                   hanja_text,
                   font=hanja_font,
-                  fill=soft_ink,
-                  stroke_width=1,
+                  fill=hanja_brown,
+                  stroke_width=2,
                   stroke_fill=warm_outline,
               )
               current_y += 84
 
           meaning_x = centered_x(
-              title_draw,
-              overlay_meaning,
-              meaning_font,
-              title_width,
+              title_draw, overlay_meaning, meaning_font, title_width
           )
           title_draw.text(
               (meaning_x, current_y),
               overlay_meaning,
               font=meaning_font,
-              fill=soft_ink,
-              stroke_width=1,
+              fill=meaning_ink,
+              stroke_width=2,
               stroke_fill=warm_outline,
           )
 
           title_layer.save("input/title_overlay.png")
 
-          # ----------------------------------------------------------
-          # 하단 정보 카드: 가로 축소 + 내부 공백 축소
-          # ----------------------------------------------------------
           card_width = 490
           card_height = 176
           canvas_padding = 18
@@ -628,14 +568,14 @@ jobs:
           draw.rounded_rectangle(
               (2, 2, card_width + 2, card_height + 2),
               radius=radius,
-              fill=(247, 235, 211, 220),
-              outline=(117, 85, 52, 165),
+              fill=(247, 235, 211, 224),
+              outline=(117, 85, 52, 170),
               width=3,
           )
           draw.rounded_rectangle(
               (9, 9, card_width - 5, card_height - 5),
               radius=max(radius - 7, 8),
-              outline=(154, 119, 79, 90),
+              outline=(154, 119, 79, 95),
               width=1,
           )
 
@@ -645,7 +585,7 @@ jobs:
           divider_x = 248
           draw.line(
               (divider_x, 23, divider_x, card_height - 21),
-              fill=(142, 101, 60, 145),
+              fill=(142, 101, 60, 150),
               width=2,
           )
 
@@ -678,7 +618,7 @@ jobs:
           card.save("input/info_card.png")
 
           print(
-              "Traditional overlays created: "
+              "Repository-font overlays created: "
               f"title={idiom}, hanja={hanja}, "
               f"difficulty={difficulty}, "
               f"usage_frequency={usage_frequency}, "
@@ -877,9 +817,9 @@ jobs:
                   "MarginR, MarginV, Encoding\n"
               )
               file.write(
-                  "Style: Default,Noto Sans CJK KR,78,&H00FFFFFF,&H000000FF,"
-                  "&H00000000,&H60000000,1,0,0,0,100,100,-1,0,1,5,3,2,"
-                  "85,85,220,1\n\n"
+                  "Style: Default,Nanum Brush Script,76,&H00EAF8FF,&H000000FF,"
+                  "&H00181818,&H70000000,0,0,0,0,100,100,0,0,1,5,3,2,"
+                  "90,90,220,1\n\n"
               )
               file.write("[Events]\n")
               file.write(
@@ -1018,7 +958,7 @@ jobs:
             -filter_complex "\
               [0:v:0][3:v:0]overlay=0:0:format=auto[titled];\
               [titled][4:v:0]overlay=(main_w-overlay_w)/2:1260:format=auto[carded];\
-              [carded]ass=input/subtitle.ass[vout];\
+              [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
               [2:a:0]atrim=0:${VIDEO_DURATION},asetpts=PTS-STARTPTS,\
