@@ -58,7 +58,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fontconfig
+          sudo apt-get install -y ffmpeg fontconfig fonts-noto-cjk
           python -m pip install --upgrade pip
           python -m pip install google-api-python-client google-auth pillow
 
@@ -67,6 +67,7 @@ jobs:
           set -euo pipefail
 
           REQUIRED_FONTS=(
+            "fonts/NanumBrush.ttf"
             "fonts/NanumMyeongjoBold.ttf"
             "fonts/NanumGothicBold.ttf"
           )
@@ -79,14 +80,17 @@ jobs:
           done
 
           mkdir -p "$HOME/.local/share/fonts/gangnamhakdang"
+          cp fonts/NanumBrush.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
           cp fonts/NanumMyeongjoBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
           cp fonts/NanumGothicBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
 
           fc-cache -f -v
 
           echo "Registered repository fonts:"
+          fc-match "Nanum Brush Script"
           fc-match "NanumMyeongjo"
           fc-match "NanumGothic"
+          fc-match "Noto Serif CJK KR"
 
       - name: Confirm workflow inputs
         run: |
@@ -398,13 +402,14 @@ jobs:
           print(f"Validated BGM duration: {duration:.3f} seconds")
           PY
 
-      - name: Generate refined title and compact info card
+      - name: Generate polished title and compact info card
         run: |
           python - <<'PY'
           from PIL import Image, ImageDraw, ImageFont, ImageFilter
           from pathlib import Path
           import os
           import re
+          import subprocess
 
           overlay_title = os.environ.get("OVERLAY_TITLE", "").strip()
           overlay_meaning = os.environ.get("OVERLAY_MEANING", "").strip()
@@ -418,17 +423,38 @@ jobs:
               raise Exception("OVERLAY_MEANING is empty")
 
           FONT_DIR = Path("fonts")
+          BRUSH_FONT = FONT_DIR / "NanumBrush.ttf"
           MYEONGJO_FONT = FONT_DIR / "NanumMyeongjoBold.ttf"
           GOTHIC_FONT = FONT_DIR / "NanumGothicBold.ttf"
 
-          for font_path in (MYEONGJO_FONT, GOTHIC_FONT):
+          for font_path in (BRUSH_FONT, MYEONGJO_FONT, GOTHIC_FONT):
               if not font_path.is_file() or font_path.stat().st_size == 0:
                   raise FileNotFoundError(
                       f"Required repository font is missing or empty: {font_path}"
                   )
 
+          def fc_match(family):
+              try:
+                  path = subprocess.check_output(
+                      ["fc-match", "-f", "%{file}", family],
+                      text=True,
+                  ).strip()
+                  if path and os.path.exists(path):
+                      return path
+              except Exception:
+                  pass
+              return ""
+
+          brush_font_path = str(BRUSH_FONT)
           myeongjo_font_path = str(MYEONGJO_FONT)
           gothic_font_path = str(GOTHIC_FONT)
+
+          # NanumMyeongjo에 없는 한자가 □로 깨질 때를 막기 위한 공식 오픈소스 CJK 폰트.
+          hanja_font_path = (
+              fc_match("Noto Serif CJK KR")
+              or fc_match("Noto Serif CJK SC")
+              or myeongjo_font_path
+          )
 
           allowed_ratings = {"★☆☆", "★★☆", "★★★", "☆☆☆"}
 
@@ -440,7 +466,6 @@ jobs:
           usage_frequency = normalize_rating(usage_frequency, "★☆☆")
           korean_history = normalize_rating(korean_history, "☆☆☆")
 
-          # overlay_title 예시: 가렴주구 (苛斂誅求)
           title_match = re.match(
               r"^\s*(.*?)\s*[\(\（]\s*(.*?)\s*[\)\）]\s*$",
               overlay_title,
@@ -471,118 +496,125 @@ jobs:
           os.makedirs("input", exist_ok=True)
 
           # ----------------------------------------------------------
-          # 상단 타이틀
-          # 제목·한자·뜻: 네이버 나눔명조 Bold
-          # 밝은 글자 + 짙은 먹색 외곽선으로 배경과 관계없이 선명하게 표시
+          # 상단 제목 영역
+          # 시안 기준: 위 여백 → 굵은 붓글씨 제목 → 한자 → 장식선 → 뜻
           # ----------------------------------------------------------
           title_width = 1080
-          title_height = 455
+          title_height = 500
           title_layer = Image.new(
               "RGBA",
               (title_width, title_height),
               (0, 0, 0, 0),
           )
-          title_draw = ImageDraw.Draw(title_layer)
+          draw = ImageDraw.Draw(title_layer)
 
-          title_color = (248, 241, 221, 255)   # 따뜻한 아이보리
-          hanja_color = (243, 229, 192, 255)   # 옅은 금빛 아이보리
-          meaning_color = (255, 248, 234, 255) # 밝은 아이보리
-          dark_outline = (26, 18, 13, 255)     # 진한 먹갈색
+          ink = (28, 22, 17, 255)
+          hanja_ink = (45, 36, 28, 255)
+          meaning_ink = (38, 31, 25, 255)
+          cream_halo = (247, 235, 211, 205)
+          line_color = (87, 66, 47, 190)
 
           idiom_font = fit_font(
-              title_draw,
+              draw,
               idiom,
-              myeongjo_font_path,
-              max_size=142,
+              brush_font_path,
+              max_size=138,
               min_size=96,
-              max_width=920,
+              max_width=880,
           )
 
-          hanja_text = f"({hanja})" if hanja else ""
           hanja_font = fit_font(
-              title_draw,
-              hanja_text,
-              myeongjo_font_path,
-              max_size=72,
-              min_size=52,
-              max_width=760,
+              draw,
+              hanja,
+              hanja_font_path,
+              max_size=70,
+              min_size=50,
+              max_width=710,
           )
 
           meaning_font = fit_font(
-              title_draw,
+              draw,
               overlay_meaning,
               myeongjo_font_path,
-              max_size=56,
-              min_size=42,
+              max_size=50,
+              min_size=38,
               max_width=900,
           )
 
-          # 타이틀 전체에 부드러운 그림자
-          shadow = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
-          shadow_draw = ImageDraw.Draw(shadow)
+          title_y = 88
+          idiom_x = centered_x(draw, idiom, idiom_font, title_width)
 
-          idiom_x = centered_x(title_draw, idiom, idiom_font, title_width)
+          # 제목의 먹 번짐 느낌을 위한 부드러운 그림자.
+          title_shadow = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
+          shadow_draw = ImageDraw.Draw(title_shadow)
           shadow_draw.text(
-              (idiom_x + 4, 49 + 5),
+              (idiom_x + 3, title_y + 5),
               idiom,
               font=idiom_font,
-              fill=(0, 0, 0, 150),
-              stroke_width=3,
-              stroke_fill=(0, 0, 0, 110),
+              fill=(0, 0, 0, 90),
           )
+          title_shadow = title_shadow.filter(ImageFilter.GaussianBlur(2.2))
+          title_layer.alpha_composite(title_shadow)
 
-          shadow = shadow.filter(ImageFilter.GaussianBlur(3.0))
-          title_layer.alpha_composite(shadow)
-
-          title_draw = ImageDraw.Draw(title_layer)
-          title_draw.text(
-              (idiom_x, 49),
+          draw = ImageDraw.Draw(title_layer)
+          draw.text(
+              (idiom_x, title_y),
               idiom,
               font=idiom_font,
-              fill=title_color,
-              stroke_width=5,
-              stroke_fill=dark_outline,
+              fill=ink,
+              stroke_width=2,
+              stroke_fill=cream_halo,
           )
 
-          current_y = 207
-
-          if hanja_text:
-              hanja_x = centered_x(
-                  title_draw,
-                  hanja_text,
-                  hanja_font,
-                  title_width,
-              )
-              title_draw.text(
-                  (hanja_x, current_y),
+          hanja_y = 235
+          if hanja:
+              hanja_text = f"·  {hanja}  ·"
+              hanja_x = centered_x(draw, hanja_text, hanja_font, title_width)
+              draw.text(
+                  (hanja_x, hanja_y),
                   hanja_text,
                   font=hanja_font,
-                  fill=hanja_color,
-                  stroke_width=4,
-                  stroke_fill=dark_outline,
+                  fill=hanja_ink,
+                  stroke_width=1,
+                  stroke_fill=cream_halo,
               )
-              current_y += 98
 
+          # 한자 아래의 얇은 전통 장식선.
+          line_y = 326
+          center_x = title_width // 2
+          draw.line((265, line_y, center_x - 36, line_y), fill=line_color, width=2)
+          draw.line((center_x + 36, line_y, 815, line_y), fill=line_color, width=2)
+          draw.polygon(
+              [
+                  (center_x, line_y - 7),
+                  (center_x + 8, line_y),
+                  (center_x, line_y + 7),
+                  (center_x - 8, line_y),
+              ],
+              outline=line_color,
+              fill=(0, 0, 0, 0),
+          )
+
+          meaning_y = 348
           meaning_x = centered_x(
-              title_draw,
+              draw,
               overlay_meaning,
               meaning_font,
               title_width,
           )
-          title_draw.text(
-              (meaning_x, current_y),
+          draw.text(
+              (meaning_x, meaning_y),
               overlay_meaning,
               font=meaning_font,
-              fill=meaning_color,
-              stroke_width=4,
-              stroke_fill=dark_outline,
+              fill=meaning_ink,
+              stroke_width=2,
+              stroke_fill=cream_halo,
           )
 
           title_layer.save("input/title_overlay.png")
 
           # ----------------------------------------------------------
-          # 정보 카드
-          # 기존 한지 분위기는 유지하되 크기와 공백을 조금 더 정돈
+          # 정보 카드: 시안처럼 자막 바로 위에 놓기 위한 컴팩트 구성
           # ----------------------------------------------------------
           card_width = 450
           card_height = 160
@@ -600,7 +632,7 @@ jobs:
           shadow_draw.rounded_rectangle(
               (10, 11, card_width + 6, card_height + 7),
               radius=radius,
-              fill=(42, 31, 22, 58),
+              fill=(42, 31, 22, 62),
           )
           card_shadow = card_shadow.filter(ImageFilter.GaussianBlur(6))
           card.alpha_composite(card_shadow)
@@ -609,14 +641,14 @@ jobs:
           draw.rounded_rectangle(
               (2, 2, card_width + 2, card_height + 2),
               radius=radius,
-              fill=(247, 235, 211, 230),
-              outline=(117, 85, 52, 180),
+              fill=(247, 235, 211, 232),
+              outline=(117, 85, 52, 185),
               width=3,
           )
           draw.rounded_rectangle(
               (9, 9, card_width - 5, card_height - 5),
               radius=max(radius - 7, 7),
-              outline=(154, 119, 79, 100),
+              outline=(154, 119, 79, 105),
               width=1,
           )
 
@@ -659,8 +691,9 @@ jobs:
           card.save("input/info_card.png")
 
           print(
-              "Refined overlays created: "
+              "Polished overlays created: "
               f"title={idiom}, hanja={hanja}, "
+              f"hanja_font={hanja_font_path}, "
               f"difficulty={difficulty}, "
               f"usage_frequency={usage_frequency}, "
               f"korean_history={korean_history}"
@@ -998,7 +1031,7 @@ jobs:
             -i input/info_card.png \
             -filter_complex "\
               [0:v:0][3:v:0]overlay=0:0:format=auto[titled];\
-              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1310:format=auto[carded];\
+              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1390:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
