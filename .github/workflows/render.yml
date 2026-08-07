@@ -448,8 +448,14 @@ jobs:
           title_font_path = str(TITLE_FONT)
           myeongjo_font_path = str(MYEONGJO_FONT)
           gothic_font_path = str(GOTHIC_FONT)
-          # 한자 폰트는 기존처럼 NanumMyeongjoBold 유지
-          hanja_font_path = myeongjo_font_path
+
+          # 한자는 CJK 글리프 누락으로 □□□□가 생기지 않도록 Noto Serif CJK를 사용합니다.
+          # KR을 우선하고, 환경에 따라 SC로 안전하게 fallback합니다.
+          hanja_font_path = (
+              fc_match("Noto Serif CJK KR")
+              or fc_match("Noto Serif CJK SC")
+              or myeongjo_font_path
+          )
 
           allowed_ratings = {"★☆☆", "★★☆", "★★★", "☆☆☆"}
 
@@ -496,9 +502,10 @@ jobs:
 
           # ----------------------------------------------------------
           # 상단 제목 영역 최적화
-          # - 제목은 묵직하고 또렷하게
-          # - 한자는 아래로 충분히 내려서 안 깨져 보이게
-          # - 뜻은 조금 줄여 가독성 확보
+          # - 제목: NanumMyeongjoExtraBold
+          # - 한자: Noto Serif CJK (한자 깨짐 방지)
+          # - 뜻: NanumMyeongjoBold
+          # - 제목/한자/뜻 간격과 외곽선을 조정해 복잡한 배경에서도 읽기 쉽게 구성
           # ----------------------------------------------------------
           title_width = 1080
           title_height = 520
@@ -506,9 +513,9 @@ jobs:
           draw = ImageDraw.Draw(title_layer)
 
           ink = (26, 21, 17, 255)
-          hanja_ink = (48, 38, 30, 255)
-          meaning_ink = (44, 35, 27, 255)
-          cream_halo = (248, 238, 218, 215)
+          hanja_ink = (30, 24, 19, 255)
+          meaning_ink = (30, 24, 19, 255)
+          cream_halo = (252, 243, 224, 235)
           line_color = (102, 79, 56, 185)
 
           idiom_font = fit_font(
@@ -535,9 +542,9 @@ jobs:
               draw,
               overlay_meaning,
               myeongjo_font_path,
-              max_size=38,
+              max_size=36,
               min_size=28,
-              max_width=860,
+              max_width=850,
           )
 
           title_y = 48
@@ -575,10 +582,10 @@ jobs:
                   hanja_display,
                   font=hanja_font,
                   fill=hanja_ink,
-                  stroke_width=2,
+                  stroke_width=3,
                   stroke_fill=cream_halo,
               )
-              current_y += hanja_h + 20
+              current_y += hanja_h + 22
           else:
               current_y += 10
 
@@ -610,7 +617,7 @@ jobs:
               overlay_meaning,
               font=meaning_font,
               fill=meaning_ink,
-              stroke_width=2,
+              stroke_width=3,
               stroke_fill=cream_halo,
           )
 
@@ -1036,7 +1043,7 @@ jobs:
             -i input/info_card.png \
             -filter_complex "\
               [0:v:0][3:v:0]overlay=0:18:format=auto[titled];\
-              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1418:format=auto[carded];\
+              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1335:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
