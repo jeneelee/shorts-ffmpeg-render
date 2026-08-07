@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
 
           REQUIRED_FONTS=(
-            "fonts/NanumBrush.ttf"
+            "fonts/NanumMyeongjoExtraBold.ttf"
             "fonts/NanumMyeongjoBold.ttf"
             "fonts/NanumGothicBold.ttf"
           )
@@ -80,14 +80,14 @@ jobs:
           done
 
           mkdir -p "$HOME/.local/share/fonts/gangnamhakdang"
-          cp fonts/NanumBrush.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+          cp fonts/NanumMyeongjoExtraBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
           cp fonts/NanumMyeongjoBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
           cp fonts/NanumGothicBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
 
           fc-cache -f -v
 
           echo "Registered repository fonts:"
-          fc-match "Nanum Brush Script"
+          fc-match "NanumMyeongjo ExtraBold"
           fc-match "NanumMyeongjo"
           fc-match "NanumGothic"
           fc-match "Noto Serif CJK KR"
@@ -423,11 +423,11 @@ jobs:
               raise Exception("OVERLAY_MEANING is empty")
 
           FONT_DIR = Path("fonts")
-          BRUSH_FONT = FONT_DIR / "NanumBrush.ttf"
+          TITLE_FONT = FONT_DIR / "NanumMyeongjoExtraBold.ttf"
           MYEONGJO_FONT = FONT_DIR / "NanumMyeongjoBold.ttf"
           GOTHIC_FONT = FONT_DIR / "NanumGothicBold.ttf"
 
-          for font_path in (BRUSH_FONT, MYEONGJO_FONT, GOTHIC_FONT):
+          for font_path in (TITLE_FONT, MYEONGJO_FONT, GOTHIC_FONT):
               if not font_path.is_file() or font_path.stat().st_size == 0:
                   raise FileNotFoundError(
                       f"Required repository font is missing or empty: {font_path}"
@@ -445,16 +445,13 @@ jobs:
                   pass
               return ""
 
-          brush_font_path = str(BRUSH_FONT)
+          title_font_path = str(TITLE_FONT)
           myeongjo_font_path = str(MYEONGJO_FONT)
           gothic_font_path = str(GOTHIC_FONT)
 
-          # NanumMyeongjo에 없는 한자가 □로 깨질 때를 막기 위한 공식 오픈소스 CJK 폰트.
-          hanja_font_path = (
-              fc_match("Noto Serif CJK KR")
-              or fc_match("Noto Serif CJK SC")
-              or myeongjo_font_path
-          )
+          # 한자는 요청대로 NanumMyeongjoBold를 기본 사용합니다.
+          # Noto Serif CJK는 희귀 한자 대응을 위한 예비 폰트로 시스템에 유지합니다.
+          hanja_font_path = myeongjo_font_path
 
           allowed_ratings = {"★☆☆", "★★☆", "★★★", "☆☆☆"}
 
@@ -497,7 +494,8 @@ jobs:
 
           # ----------------------------------------------------------
           # 상단 제목 영역
-          # 시안 기준: 위 여백 → 굵은 붓글씨 제목 → 한자 → 장식선 → 뜻
+          # 제목: NanumMyeongjo ExtraBold / 한자·뜻: NanumMyeongjo Bold
+          # 위 여백 → 묵직한 제목 → 정갈한 한자 → 장식선 → 읽기 쉬운 뜻
           # ----------------------------------------------------------
           title_width = 1080
           title_height = 500
@@ -517,17 +515,17 @@ jobs:
           idiom_font = fit_font(
               draw,
               idiom,
-              brush_font_path,
-              max_size=138,
-              min_size=96,
-              max_width=880,
+              title_font_path,
+              max_size=150,
+              min_size=104,
+              max_width=900,
           )
 
           hanja_font = fit_font(
               draw,
               hanja,
               hanja_font_path,
-              max_size=70,
+              max_size=68,
               min_size=50,
               max_width=710,
           )
@@ -536,7 +534,7 @@ jobs:
               draw,
               overlay_meaning,
               myeongjo_font_path,
-              max_size=50,
+              max_size=48,
               min_size=38,
               max_width=900,
           )
@@ -551,9 +549,9 @@ jobs:
               (idiom_x + 3, title_y + 5),
               idiom,
               font=idiom_font,
-              fill=(0, 0, 0, 90),
+              fill=(0, 0, 0, 105),
           )
-          title_shadow = title_shadow.filter(ImageFilter.GaussianBlur(2.2))
+          title_shadow = title_shadow.filter(ImageFilter.GaussianBlur(2.0))
           title_layer.alpha_composite(title_shadow)
 
           draw = ImageDraw.Draw(title_layer)
@@ -562,7 +560,7 @@ jobs:
               idiom,
               font=idiom_font,
               fill=ink,
-              stroke_width=2,
+              stroke_width=3,
               stroke_fill=cream_halo,
           )
 
