@@ -579,24 +579,41 @@ jobs:
               hanja_x = centered_x(draw, hanja_display, hanja_font, title_width, stroke_width=2)
               hanja_w, hanja_h = text_size(draw, hanja_display, hanja_font, stroke_width=2)
 
-              # 밝은 배경에서도 한자가 묻히지 않도록 아주 약한 먹색 그림자
+              # 한자 가독성 강화:
+              # 크기/위치는 유지하고, 배경과 분리되는 부드러운 아이보리 헤일로를 먼저 깝니다.
+              hanja_halo = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
+              hanja_halo_draw = ImageDraw.Draw(hanja_halo)
+              hanja_halo_draw.text(
+                  (hanja_x, current_y),
+                  hanja_display,
+                  font=hanja_font,
+                  fill=(255, 248, 234, 190),
+                  stroke_width=5,
+                  stroke_fill=(255, 248, 234, 190),
+              )
+              hanja_halo = hanja_halo.filter(ImageFilter.GaussianBlur(2.0))
+              title_layer.alpha_composite(hanja_halo)
+
+              draw = ImageDraw.Draw(title_layer)
+
+              # 아주 약한 먹색 그림자로 획을 또렷하게
               draw.text(
                   (hanja_x + 2, current_y + 3),
                   hanja_display,
                   font=hanja_font,
-                  fill=(0, 0, 0, 120),
+                  fill=(0, 0, 0, 130),
                   stroke_width=1,
-                  stroke_fill=(0, 0, 0, 90),
+                  stroke_fill=(0, 0, 0, 100),
               )
 
-              # 본문: 진한 먹색 + 얇고 선명한 아이보리 외곽선
+              # 본문: 진한 먹색 + 얇은 아이보리 외곽선
               draw.text(
                   (hanja_x, current_y),
                   hanja_display,
                   font=hanja_font,
-                  fill=hanja_ink,
-                  stroke_width=2,
-                  stroke_fill=cream_halo,
+                  fill=(5, 4, 3, 255),
+                  stroke_width=1,
+                  stroke_fill=(255, 248, 234, 255),
               )
               current_y += hanja_h + 22
           else:
@@ -625,30 +642,45 @@ jobs:
               title_width,
               stroke_width=2,
           )
-          # 뜻도 한자와 동일하게 '진한 먹색 + 얇은 밝은 외곽선 + 약한 그림자'
+          # 뜻도 크기/위치는 유지하고, 배경에서 분리되는 부드러운 헤일로를 추가합니다.
+          meaning_halo = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
+          meaning_halo_draw = ImageDraw.Draw(meaning_halo)
+          meaning_halo_draw.text(
+              (meaning_x, meaning_y),
+              overlay_meaning,
+              font=meaning_font,
+              fill=(255, 248, 234, 190),
+              stroke_width=5,
+              stroke_fill=(255, 248, 234, 190),
+          )
+          meaning_halo = meaning_halo.filter(ImageFilter.GaussianBlur(2.0))
+          title_layer.alpha_composite(meaning_halo)
+
+          draw = ImageDraw.Draw(title_layer)
+
           draw.text(
               (meaning_x + 2, meaning_y + 3),
               overlay_meaning,
               font=meaning_font,
-              fill=(0, 0, 0, 110),
+              fill=(0, 0, 0, 125),
               stroke_width=1,
-              stroke_fill=(0, 0, 0, 80),
+              stroke_fill=(0, 0, 0, 95),
           )
           draw.text(
               (meaning_x, meaning_y),
               overlay_meaning,
               font=meaning_font,
-              fill=meaning_ink,
-              stroke_width=2,
-              stroke_fill=cream_halo,
+              fill=(8, 6, 5, 255),
+              stroke_width=1,
+              stroke_fill=(255, 248, 234, 255),
           )
 
           title_layer.save("input/title_overlay.png")
 
           # ----------------------------------------------------------
           # 정보 카드
-          # - 현재 구조는 유지
-          # - 너무 커 보이지 않도록 살짝 컴팩트
+          # - 크기/위치/글씨는 유지
+          # - 배경만 살짝 더 투명하게 조정해 장면과 자연스럽게 어우러지도록 구성
           # ----------------------------------------------------------
           card_width = 430
           card_height = 152
@@ -666,7 +698,7 @@ jobs:
           shadow_draw.rounded_rectangle(
               (10, 11, card_width + 6, card_height + 7),
               radius=radius,
-              fill=(42, 31, 22, 60),
+              fill=(42, 31, 22, 48),
           )
           card_shadow = card_shadow.filter(ImageFilter.GaussianBlur(6))
           card.alpha_composite(card_shadow)
@@ -675,7 +707,7 @@ jobs:
           draw.rounded_rectangle(
               (2, 2, card_width + 2, card_height + 2),
               radius=radius,
-              fill=(247, 235, 211, 232),
+              fill=(247, 235, 211, 205),
               outline=(117, 85, 52, 185),
               width=3,
           )
