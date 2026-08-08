@@ -1018,12 +1018,16 @@ jobs:
 
           IMAGE_COUNT=$(cat image_count.txt)
           VIDEO_DURATION=$(cat video_duration.txt)
+          CROSSFADE_DURATION="0.40"
 
-          CLIP_DURATION=$(python - "$IMAGE_COUNT" "$VIDEO_DURATION" <<'PY'
+          # xfade는 장면 사이를 겹쳐서 전환하므로,
+          # 최종 길이가 VIDEO_DURATION과 정확히 맞도록 각 이미지 클립 길이를 보정합니다.
+          CLIP_DURATION=$(python - "$IMAGE_COUNT" "$VIDEO_DURATION" "$CROSSFADE_DURATION" <<'PY'
           import sys
 
           image_count = int(sys.argv[1])
           video_duration = float(sys.argv[2])
+          crossfade_duration = float(sys.argv[3])
 
           if image_count <= 0:
               raise SystemExit("IMAGE_COUNT must be greater than zero")
@@ -1031,14 +1035,34 @@ jobs:
           if video_duration <= 0:
               raise SystemExit("VIDEO_DURATION must be greater than zero")
 
-          print(max(video_duration / image_count, 3.0))
+          if crossfade_duration < 0:
+              raise SystemExit("CROSSFADE_DURATION must not be negative")
+
+          if image_count == 1:
+              clip_duration = video_duration
+          else:
+              # final = image_count * clip_duration
+              #         - (image_count - 1) * crossfade_duration
+              clip_duration = (
+                  video_duration
+                  + (image_count - 1) * crossfade_duration
+              ) / image_count
+
+          if clip_duration <= crossfade_duration:
+              raise SystemExit(
+                  "Clip duration must be longer than crossfade duration"
+              )
+
+          print(f"{clip_duration:.6f}")
           PY
           )
 
+          printf '%s' "$CLIP_DURATION" > clip_duration.txt
+          printf '%s' "$CROSSFADE_DURATION" > crossfade_duration.txt
+
           echo "Image count: $IMAGE_COUNT"
           echo "Clip duration: $CLIP_DURATION"
-
-          : > clips/list.txt
+          echo "Crossfade duration: $CROSSFADE_DURATION"
 
           for i in $(seq 1 "$IMAGE_COUNT"); do
             if [ ! -s "input/scene${i}.png" ]; then
@@ -1050,18 +1074,113 @@ jobs:
               -loop 1 \
               -t "$CLIP_DURATION" \
               -i "input/scene${i}.png" \
-              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" \
+              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30" \
               -r 30 \
+              -an \
               -c:v libx264 \
               -preset medium \
               -crf 20 \
               -pix_fmt yuv420p \
               "clips/clip${i}.mp4"
-
-            echo "file 'clip${i}.mp4'" >> clips/list.txt
           done
 
-      - name: Concatenate clips and add TTS and BGM
+      - name: Create smooth crossfade scene video
+        run: |
+          set -euo pipefail
+
+          IMAGE_COUNT=$(cat image_count.txt)
+          VIDEO_DURATION=$(cat video_duration.txt)
+          CLIP_DURATION=$(cat clip_duration.txt)
+          CROSSFADE_DURATION=$(cat crossfade_duration.txt)
+
+          if [ "$IMAGE_COUNT" -eq 1 ]; then
+            cp clips/clip1.mp4 input/scenes_xfade.mp4
+          else
+            INPUT_ARGS=()
+
+            for i in $(seq 1 "$IMAGE_COUNT"); do
+              INPUT_ARGS+=(-i "clips/clip${i}.mp4")
+            done
+
+            FILTER_COMPLEX=$(python - "$IMAGE_COUNT" "$CLIP_DURATION" "$CROSSFADE_DURATION" <<'PY'
+          import sys
+
+          image_count = int(sys.argv[1])
+          clip_duration = float(sys.argv[2])
+          fade_duration = float(sys.argv[3])
+
+          filters = []
+          previous = "[0:v]"
+
+          for index in range(1, image_count):
+              offset = index * (clip_duration - fade_duration)
+              output_label = (
+                  "[vxfade]"
+                  if index == image_count - 1
+                  else f"[xf{index}]"
+              )
+
+              filters.append(
+                  f"{previous}[{index}:v]"
+                  f"xfade=transition=fade:"
+                  f"duration={fade_duration:.6f}:"
+                  f"offset={offset:.6f}"
+                  f"{output_label}"
+              )
+
+              previous = output_label
+
+          print(";".join(filters))
+          PY
+            )
+
+            echo "Crossfade filter:"
+            echo "$FILTER_COMPLEX"
+
+            ffmpeg -hide_banner -loglevel error -y \
+              "${INPUT_ARGS[@]}" \
+              -filter_complex "$FILTER_COMPLEX" \
+              -map "[vxfade]" \
+              -t "$VIDEO_DURATION" \
+              -r 30 \
+              -an \
+              -c:v libx264 \
+              -preset medium \
+              -crf 20 \
+              -pix_fmt yuv420p \
+              input/scenes_xfade.mp4
+          fi
+
+          if [ ! -s input/scenes_xfade.mp4 ]; then
+            echo "Crossfade scene video was not created."
+            exit 1
+          fi
+
+          XFADE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            input/scenes_xfade.mp4)
+
+          python - "$VIDEO_DURATION" "$XFADE_DURATION" <<'PY'
+          import sys
+
+          expected = float(sys.argv[1])
+          actual = float(sys.argv[2])
+
+          if abs(expected - actual) > 0.25:
+              raise SystemExit(
+                  f"Crossfade duration mismatch: "
+                  f"expected {expected:.3f}s, got {actual:.3f}s"
+              )
+
+          print(
+              f"Validated crossfade scene duration: "
+              f"{actual:.3f}s (target {expected:.3f}s)"
+          )
+          PY
+
+      - name: Add overlays TTS and BGM
         run: |
           set -euo pipefail
 
@@ -1088,14 +1207,13 @@ jobs:
 
           echo "Narration duration: $AUDIO_DURATION"
           echo "Final video duration: $VIDEO_DURATION"
+          echo "Scene transition: dissolve/crossfade 0.40s"
           echo "BGM fade-out start: $FADE_OUT_START"
           echo "BGM fade-out duration: $FADE_OUT_DURATION"
           echo "BGM volume: 0.07"
 
           ffmpeg -hide_banner -loglevel error -y \
-            -f concat \
-            -safe 0 \
-            -i clips/list.txt \
+            -i input/scenes_xfade.mp4 \
             -i input/audio.mp3 \
             -stream_loop -1 \
             -i assets/bgm.mp3 \
