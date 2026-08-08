@@ -524,6 +524,10 @@ jobs:
           subtitle_outline = (26, 18, 13, 255)
           subtitle_shadow = (0, 0, 0, 120)
 
+          # 제목은 기존 스타일을 그대로 유지하기 위해
+          # 기존 아이보리 외곽선 색상을 별도로 보존합니다.
+          cream_halo = (255, 248, 234, 255)
+
           line_color = (102, 79, 56, 185)
 
           idiom_font = fit_font(
