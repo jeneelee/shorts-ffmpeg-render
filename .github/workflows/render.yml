@@ -1,3 +1,6 @@
+render_gangnamhakdang_final_readability_v3.yml
+
+
 name: Render Shorts Video
 
 on:
@@ -505,7 +508,8 @@ jobs:
           # - 제목: NanumMyeongjoExtraBold
           # - 한자: Noto Serif CJK (한자 깨짐 방지)
           # - 뜻: NanumMyeongjoBold
-          # - 제목/한자/뜻 간격과 외곽선을 조정해 복잡한 배경에서도 읽기 쉽게 구성
+          # - 제목은 기존 크기/스타일을 유지하고 위치만 살짝 아래로
+          # - 한자/뜻은 진한 먹색 + 밝은 얇은 외곽선 + 약한 그림자로 가독성 강화
           # ----------------------------------------------------------
           title_width = 1080
           title_height = 520
@@ -513,9 +517,9 @@ jobs:
           draw = ImageDraw.Draw(title_layer)
 
           ink = (26, 21, 17, 255)
-          hanja_ink = (30, 24, 19, 255)
-          meaning_ink = (30, 24, 19, 255)
-          cream_halo = (252, 243, 224, 235)
+          hanja_ink = (10, 8, 7, 255)
+          meaning_ink = (14, 11, 9, 255)
+          cream_halo = (255, 248, 234, 255)
           line_color = (102, 79, 56, 185)
 
           idiom_font = fit_font(
@@ -547,7 +551,7 @@ jobs:
               max_width=850,
           )
 
-          title_y = 48
+          title_y = 60
           idiom_x = centered_x(draw, idiom, idiom_font, title_width, stroke_width=4)
           idiom_w, idiom_h = text_size(draw, idiom, idiom_font, stroke_width=4)
 
@@ -572,17 +576,29 @@ jobs:
               stroke_fill=cream_halo,
           )
 
-          current_y = title_y + idiom_h + 26
+          current_y = title_y + idiom_h + 14
 
           if hanja_display:
               hanja_x = centered_x(draw, hanja_display, hanja_font, title_width, stroke_width=2)
               hanja_w, hanja_h = text_size(draw, hanja_display, hanja_font, stroke_width=2)
+
+              # 밝은 배경에서도 한자가 묻히지 않도록 아주 약한 먹색 그림자
+              draw.text(
+                  (hanja_x + 2, current_y + 3),
+                  hanja_display,
+                  font=hanja_font,
+                  fill=(0, 0, 0, 120),
+                  stroke_width=1,
+                  stroke_fill=(0, 0, 0, 90),
+              )
+
+              # 본문: 진한 먹색 + 얇고 선명한 아이보리 외곽선
               draw.text(
                   (hanja_x, current_y),
                   hanja_display,
                   font=hanja_font,
                   fill=hanja_ink,
-                  stroke_width=3,
+                  stroke_width=2,
                   stroke_fill=cream_halo,
               )
               current_y += hanja_h + 22
@@ -612,12 +628,21 @@ jobs:
               title_width,
               stroke_width=2,
           )
+          # 뜻도 한자와 동일하게 '진한 먹색 + 얇은 밝은 외곽선 + 약한 그림자'
+          draw.text(
+              (meaning_x + 2, meaning_y + 3),
+              overlay_meaning,
+              font=meaning_font,
+              fill=(0, 0, 0, 110),
+              stroke_width=1,
+              stroke_fill=(0, 0, 0, 80),
+          )
           draw.text(
               (meaning_x, meaning_y),
               overlay_meaning,
               font=meaning_font,
               fill=meaning_ink,
-              stroke_width=3,
+              stroke_width=2,
               stroke_fill=cream_halo,
           )
 
@@ -1043,7 +1068,7 @@ jobs:
             -i input/info_card.png \
             -filter_complex "\
               [0:v:0][3:v:0]overlay=0:18:format=auto[titled];\
-              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1335:format=auto[carded];\
+              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1360:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
