@@ -498,6 +498,127 @@ jobs:
               box = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
               return box[2] - box[0], box[3] - box[1]
 
+          def fit_meaning_lines(
+              draw,
+              text,
+              font_path,
+              max_size=36,
+              min_size=28,
+              max_width=850,
+              preferred_chars=18,
+          ):
+              """
+              사자성어 뜻 전용 레이아웃.
+
+              - 짧은 뜻은 기존처럼 한 줄로 표시
+              - 긴 뜻은 띄어쓰기(단어) 기준으로 최대 2줄 분할
+              - 18자 안팎을 선호하되 실제 픽셀 폭(max_width)을 최종 기준으로 사용
+              - 가능하면 기존 최대 글자 크기 36을 유지
+              - 정말 긴 문장일 때만 2px 단위로 최소 28까지 축소
+              """
+
+              text = re.sub(r"\s+", " ", text).strip()
+
+              if not text:
+                  return [""], ImageFont.truetype(font_path, max_size)
+
+              words = text.split()
+
+              def line_width(line, font):
+                  box = draw.textbbox(
+                      (0, 0),
+                      line,
+                      font=font,
+                      stroke_width=4,
+                  )
+                  return box[2] - box[0]
+
+              # 큰 글씨부터 시도해서 기존 크기감을 최대한 유지
+              for size in range(max_size, min_size - 1, -2):
+                  font = ImageFont.truetype(font_path, size)
+                  full_width = line_width(text, font)
+
+                  # 짧은 뜻은 기존처럼 한 줄
+                  if len(text) <= preferred_chars and full_width <= max_width:
+                      return [text], font
+
+                  candidates = []
+
+                  # 긴 뜻은 띄어쓰기 기준으로 가장 자연스러운 2줄 지점 탐색
+                  if len(words) >= 2:
+                      for index in range(1, len(words)):
+                          line1 = " ".join(words[:index]).strip()
+                          line2 = " ".join(words[index:]).strip()
+
+                          width1 = line_width(line1, font)
+                          width2 = line_width(line2, font)
+
+                          if width1 <= max_width and width2 <= max_width:
+                              char_over = (
+                                  max(0, len(line1) - preferred_chars)
+                                  + max(0, len(line2) - preferred_chars)
+                              )
+                              char_balance = abs(len(line1) - len(line2))
+                              pixel_balance = abs(width1 - width2)
+
+                              score = (
+                                  char_over * 10000
+                                  + char_balance * 100
+                                  + pixel_balance
+                              )
+                              candidates.append((score, line1, line2))
+
+                  if candidates:
+                      candidates.sort(key=lambda item: item[0])
+                      _, line1, line2 = candidates[0]
+                      return [line1, line2], font
+
+                  # 띄어쓰기가 없거나 단어 기준 분할만으로 맞지 않는 예외 처리
+                  if len(text) > 1:
+                      middle = len(text) // 2
+                      split_points = sorted(
+                          range(1, len(text)),
+                          key=lambda index: abs(index - middle),
+                      )
+
+                      for index in split_points:
+                          line1 = text[:index].strip()
+                          line2 = text[index:].strip()
+
+                          if (
+                              line1
+                              and line2
+                              and line_width(line1, font) <= max_width
+                              and line_width(line2, font) <= max_width
+                          ):
+                              return [line1, line2], font
+
+              # 극단적으로 긴 값에 대한 최종 안전장치
+              font = ImageFont.truetype(font_path, min_size)
+
+              if len(words) >= 2:
+                  best = None
+
+                  for index in range(1, len(words)):
+                      line1 = " ".join(words[:index]).strip()
+                      line2 = " ".join(words[index:]).strip()
+
+                      max_line_width = max(
+                          line_width(line1, font),
+                          line_width(line2, font),
+                      )
+                      balance = abs(len(line1) - len(line2))
+                      score = (max_line_width, balance)
+
+                      if best is None or score < best[0]:
+                          best = (score, line1, line2)
+
+                  if best:
+                      return [best[1], best[2]], font
+
+              middle = max(1, len(text) // 2)
+              return [text[:middle].strip(), text[middle:].strip()], font
+
           os.makedirs("input", exist_ok=True)
 
           # ----------------------------------------------------------
@@ -550,13 +671,14 @@ jobs:
               max_width=740,
           )
 
-          meaning_font = fit_font(
+          meaning_lines, meaning_font = fit_meaning_lines(
               draw,
               overlay_meaning,
               myeongjo_font_path,
               max_size=36,
               min_size=28,
               max_width=850,
+              preferred_chars=18,
           )
 
           title_y = 60
@@ -642,44 +764,69 @@ jobs:
           )
 
           meaning_y = line_y + 18
-          meaning_x = centered_x(
-              draw,
-              overlay_meaning,
-              meaning_font,
-              title_width,
-              stroke_width=2,
-          )
+          meaning_line_spacing = 8
+
           # 뜻 가독성:
-          # 한자와 동일하게 자막식 '밝은 본문 + 진한 외곽선 + 약한 그림자'를 사용합니다.
-          # 뜻은 글자 크기가 더 작으므로 외곽선을 4px로 조정합니다.
+          # - 짧으면 기존처럼 한 줄
+          # - 길면 띄어쓰기 기준 최대 2줄
+          # - 각 줄은 화면 중앙에 개별 정렬
+          # - 기존 밝은 본문 + 진한 외곽선 + 약한 그림자 스타일 유지
           meaning_shadow_layer = Image.new(
               "RGBA",
               title_layer.size,
               (0, 0, 0, 0),
           )
           meaning_shadow_draw = ImageDraw.Draw(meaning_shadow_layer)
-          meaning_shadow_draw.text(
-              (meaning_x + 3, meaning_y + 4),
-              overlay_meaning,
-              font=meaning_font,
-              fill=subtitle_shadow,
-              stroke_width=4,
-              stroke_fill=(0, 0, 0, 95),
-          )
+
+          meaning_positions = []
+          current_meaning_y = meaning_y
+
+          for meaning_line in meaning_lines:
+              meaning_x = centered_x(
+                  draw,
+                  meaning_line,
+                  meaning_font,
+                  title_width,
+                  stroke_width=4,
+              )
+              _, meaning_line_h = text_size(
+                  draw,
+                  meaning_line,
+                  meaning_font,
+                  stroke_width=4,
+              )
+
+              meaning_positions.append(
+                  (meaning_x, current_meaning_y, meaning_line)
+              )
+
+              meaning_shadow_draw.text(
+                  (meaning_x + 3, current_meaning_y + 4),
+                  meaning_line,
+                  font=meaning_font,
+                  fill=subtitle_shadow,
+                  stroke_width=4,
+                  stroke_fill=(0, 0, 0, 95),
+              )
+
+              current_meaning_y += meaning_line_h + meaning_line_spacing
+
           meaning_shadow_layer = meaning_shadow_layer.filter(
               ImageFilter.GaussianBlur(1.3)
           )
           title_layer.alpha_composite(meaning_shadow_layer)
 
           draw = ImageDraw.Draw(title_layer)
-          draw.text(
-              (meaning_x, meaning_y),
-              overlay_meaning,
-              font=meaning_font,
-              fill=subtitle_fill,
-              stroke_width=4,
-              stroke_fill=subtitle_outline,
-          )
+
+          for meaning_x, meaning_line_y, meaning_line in meaning_positions:
+              draw.text(
+                  (meaning_x, meaning_line_y),
+                  meaning_line,
+                  font=meaning_font,
+                  fill=subtitle_fill,
+                  stroke_width=4,
+                  stroke_fill=subtitle_outline,
+              )
 
           title_layer.save("input/title_overlay.png")
 
