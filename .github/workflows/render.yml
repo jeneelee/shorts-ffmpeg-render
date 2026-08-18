@@ -49,6 +49,9 @@ jobs:
       USAGE_FREQUENCY: ${{ github.event.inputs.usage_frequency }}
       KOREAN_HISTORY: ${{ github.event.inputs.korean_history }}
       END_PADDING_SECONDS: "1.2"
+      # iPhone/YouTube 상단 UI와 제목이 겹치지 않도록 전체 제목 오버레이를 아래로 내립니다.
+      # 1080x1920 기준. 필요하면 이 값만 조절하면 됩니다.
+      TITLE_OVERLAY_Y: "160"
 
     steps:
       - name: Checkout repository
@@ -1355,6 +1358,7 @@ jobs:
           echo "Narration duration: $AUDIO_DURATION"
           echo "Final video duration: $VIDEO_DURATION"
           echo "Scene transition: dissolve/crossfade 0.40s"
+          echo "Title overlay Y (iPhone safe area): $TITLE_OVERLAY_Y"
           echo "BGM fade-out start: $FADE_OUT_START"
           echo "BGM fade-out duration: $FADE_OUT_DURATION"
           echo "BGM volume: 0.07"
@@ -1369,7 +1373,7 @@ jobs:
             -loop 1 \
             -i input/info_card.png \
             -filter_complex "\
-              [0:v:0][3:v:0]overlay=0:18:format=auto[titled];\
+              [0:v:0][3:v:0]overlay=0:${TITLE_OVERLAY_Y}:format=auto[titled];\
               [titled][4:v:0]overlay=(main_w-overlay_w)/2:1360:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
