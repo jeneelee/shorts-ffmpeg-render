@@ -7,8 +7,12 @@ on:
         description: Unique render job ID
         required: true
         type: string
+      hook_title:
+        description: Hook title shown in the top black area
+        required: true
+        type: string
       overlay_title:
-        description: Idiom and Chinese characters shown at the top
+        description: Idiom and Chinese characters shown inside the video area
         required: true
         type: string
       overlay_meaning:
@@ -42,6 +46,7 @@ jobs:
 
     env:
       JOB_ID: ${{ github.event.inputs.job_id }}
+      HOOK_TITLE: ${{ github.event.inputs.hook_title }}
       OVERLAY_TITLE: ${{ github.event.inputs.overlay_title }}
       OVERLAY_MEANING: ${{ github.event.inputs.overlay_meaning }}
       VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
@@ -49,9 +54,16 @@ jobs:
       USAGE_FREQUENCY: ${{ github.event.inputs.usage_frequency }}
       KOREAN_HISTORY: ${{ github.event.inputs.korean_history }}
       END_PADDING_SECONDS: "1.2"
-      # iPhone/YouTube 상단 UI와 제목이 겹치지 않도록 전체 제목 오버레이를 아래로 내립니다.
-      # 1080x1920 기준. 필요하면 이 값만 조절하면 됩니다.
-      TITLE_OVERLAY_Y: "160"
+
+      # 1080x1920 레이아웃
+      # 상단 검정 300px  : 후킹 제목
+      # 중앙 영상 1320px : 사자성어/한자/뜻 + 일러스트 + TTS 자막
+      # 하단 검정 300px  : 정보 카드
+      TOP_BLACK_HEIGHT: "300"
+      VIDEO_AREA_HEIGHT: "1320"
+      BOTTOM_BLACK_HEIGHT: "300"
+      TITLE_OVERLAY_Y: "300"
+      INFO_CARD_Y: "1685"
 
     steps:
       - name: Checkout repository
@@ -98,6 +110,7 @@ jobs:
       - name: Confirm workflow inputs
         run: |
           echo "JOB_ID=${JOB_ID}"
+          echo "HOOK_TITLE=${HOOK_TITLE}"
           echo "OVERLAY_TITLE=${OVERLAY_TITLE}"
           echo "DIFFICULTY=${DIFFICULTY}"
           echo "USAGE_FREQUENCY=${USAGE_FREQUENCY}"
@@ -405,7 +418,7 @@ jobs:
           print(f"Validated BGM duration: {duration:.3f} seconds")
           PY
 
-      - name: Generate polished title and compact info card
+      - name: Generate hook title, polished title and compact info card
         run: |
           python - <<'PY'
           from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -414,12 +427,15 @@ jobs:
           import re
           import subprocess
 
+          hook_title = os.environ.get("HOOK_TITLE", "").strip()
           overlay_title = os.environ.get("OVERLAY_TITLE", "").strip()
           overlay_meaning = os.environ.get("OVERLAY_MEANING", "").strip()
           difficulty = os.environ.get("DIFFICULTY", "").strip()
           usage_frequency = os.environ.get("USAGE_FREQUENCY", "").strip()
           korean_history = os.environ.get("KOREAN_HISTORY", "").strip()
 
+          if not hook_title:
+              raise Exception("HOOK_TITLE is empty")
           if not overlay_title:
               raise Exception("OVERLAY_TITLE is empty")
           if not overlay_meaning:
@@ -500,6 +516,55 @@ jobs:
           def text_size(draw, text, font, stroke_width=0):
               box = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
               return box[2] - box[0], box[3] - box[1]
+
+          def fit_hook_lines(
+              draw,
+              text,
+              font_path,
+              max_size=58,
+              min_size=40,
+              max_width=900,
+          ):
+              text = re.sub(r"\s+", " ", text).strip()
+              words = text.split()
+
+              def width(line, font):
+                  box = draw.textbbox((0, 0), line, font=font, stroke_width=0)
+                  return box[2] - box[0]
+
+              for size in range(max_size, min_size - 1, -2):
+                  font = ImageFont.truetype(font_path, size)
+
+                  if width(text, font) <= max_width:
+                      return [text], font
+
+                  candidates = []
+                  if len(words) >= 2:
+                      for index in range(1, len(words)):
+                          line1 = " ".join(words[:index]).strip()
+                          line2 = " ".join(words[index:]).strip()
+                          if width(line1, font) <= max_width and width(line2, font) <= max_width:
+                              score = (
+                                  abs(len(line1) - len(line2)) * 100
+                                  + abs(width(line1, font) - width(line2, font))
+                              )
+                              candidates.append((score, line1, line2))
+
+                  if candidates:
+                      candidates.sort(key=lambda item: item[0])
+                      _, line1, line2 = candidates[0]
+                      return [line1, line2], font
+
+              font = ImageFont.truetype(font_path, min_size)
+              if len(words) >= 2:
+                  middle = max(1, len(words) // 2)
+                  return [
+                      " ".join(words[:middle]).strip(),
+                      " ".join(words[middle:]).strip(),
+                  ], font
+
+              middle = max(1, len(text) // 2)
+              return [text[:middle].strip(), text[middle:].strip()], font
 
           def fit_meaning_lines(
               draw,
@@ -625,7 +690,50 @@ jobs:
           os.makedirs("input", exist_ok=True)
 
           # ----------------------------------------------------------
-          # 상단 제목 영역 최적화
+          # 상단 검정 영역용 후킹 제목
+          # ----------------------------------------------------------
+          hook_width = 1080
+          hook_height = 300
+          hook_layer = Image.new("RGBA", (hook_width, hook_height), (0, 0, 0, 0))
+          hook_draw = ImageDraw.Draw(hook_layer)
+
+          hook_lines, hook_font = fit_hook_lines(
+              hook_draw,
+              hook_title,
+              gothic_font_path,
+              max_size=58,
+              min_size=40,
+              max_width=900,
+          )
+
+          hook_fill = (255, 255, 255, 255)
+          hook_shadow_fill = (0, 0, 0, 165)
+          hook_line_gap = 12
+
+          line_metrics = []
+          total_hook_h = 0
+          for line in hook_lines:
+              box = hook_draw.textbbox((0, 0), line, font=hook_font)
+              line_h = box[3] - box[1]
+              line_metrics.append((line, line_h))
+              total_hook_h += line_h
+
+          total_hook_h += hook_line_gap * max(0, len(hook_lines) - 1)
+          hook_y = max(88, int((hook_height - total_hook_h) / 2) + 18)
+
+          for line, line_h in line_metrics:
+              box = hook_draw.textbbox((0, 0), line, font=hook_font)
+              line_w = box[2] - box[0]
+              x = int((hook_width - line_w) / 2)
+
+              hook_draw.text((x + 2, hook_y + 3), line, font=hook_font, fill=hook_shadow_fill)
+              hook_draw.text((x, hook_y), line, font=hook_font, fill=hook_fill)
+              hook_y += line_h + hook_line_gap
+
+          hook_layer.save("input/hook_overlay.png")
+
+          # ----------------------------------------------------------
+          # 중앙 영상 영역 상단의 사자성어/한자/뜻
           # - 제목: NanumMyeongjoExtraBold
           # - 한자: Noto Serif CJK (한자 깨짐 방지)
           # - 뜻: NanumMyeongjoBold
@@ -916,6 +1024,7 @@ jobs:
 
           print(
               "Polished overlays created: "
+              f"hook={hook_title}, "
               f"title={idiom}, hanja={hanja}, "
               f"hanja_font={hanja_font_path}, "
               f"difficulty={difficulty}, "
@@ -1117,7 +1226,7 @@ jobs:
               file.write(
                   "Style: Default,NanumMyeongjo,70,&H00EAF8FF,&H000000FF,"
                   "&H000D121A,&H70000000,1,0,0,0,100,100,-1,0,1,6,2,2,"
-                  "95,95,215,1\n\n"
+                  "95,95,360,1\n\n"
               )
               file.write("[Events]\n")
               file.write(
@@ -1162,16 +1271,15 @@ jobs:
           )
           PY
 
-      - name: Create image clips
+      - name: Create image clips with subtle motion and black bars
         run: |
           set -euo pipefail
 
           IMAGE_COUNT=$(cat image_count.txt)
           VIDEO_DURATION=$(cat video_duration.txt)
           CROSSFADE_DURATION="0.40"
+          FPS="30"
 
-          # xfade는 장면 사이를 겹쳐서 전환하므로,
-          # 최종 길이가 VIDEO_DURATION과 정확히 맞도록 각 이미지 클립 길이를 보정합니다.
           CLIP_DURATION=$(python - "$IMAGE_COUNT" "$VIDEO_DURATION" "$CROSSFADE_DURATION" <<'PY'
           import sys
 
@@ -1181,29 +1289,31 @@ jobs:
 
           if image_count <= 0:
               raise SystemExit("IMAGE_COUNT must be greater than zero")
-
           if video_duration <= 0:
               raise SystemExit("VIDEO_DURATION must be greater than zero")
-
           if crossfade_duration < 0:
               raise SystemExit("CROSSFADE_DURATION must not be negative")
 
           if image_count == 1:
               clip_duration = video_duration
           else:
-              # final = image_count * clip_duration
-              #         - (image_count - 1) * crossfade_duration
               clip_duration = (
                   video_duration
                   + (image_count - 1) * crossfade_duration
               ) / image_count
 
           if clip_duration <= crossfade_duration:
-              raise SystemExit(
-                  "Clip duration must be longer than crossfade duration"
-              )
+              raise SystemExit("Clip duration must be longer than crossfade duration")
 
           print(f"{clip_duration:.6f}")
+          PY
+          )
+
+          TOTAL_FRAMES=$(python - "$CLIP_DURATION" "$FPS" <<'PY'
+          import sys
+          duration = float(sys.argv[1])
+          fps = int(sys.argv[2])
+          print(max(2, int(round(duration * fps))))
           PY
           )
 
@@ -1213,6 +1323,8 @@ jobs:
           echo "Image count: $IMAGE_COUNT"
           echo "Clip duration: $CLIP_DURATION"
           echo "Crossfade duration: $CROSSFADE_DURATION"
+          echo "Motion frames per clip: $TOTAL_FRAMES"
+          echo "Layout: black 300 / video 1320 / black 300"
 
           for i in $(seq 1 "$IMAGE_COUNT"); do
             if [ ! -s "input/scene${i}.png" ]; then
@@ -1220,12 +1332,36 @@ jobs:
               exit 1
             fi
 
+            case "$i" in
+              1)
+                MOTION="zoompan=z='min(zoom+0.00045,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+              2)
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)*on/${TOTAL_FRAMES}':y='(ih-ih/zoom)/2':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+              3)
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)*(1-on/${TOTAL_FRAMES})':y='(ih-ih/zoom)/2':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+              4)
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*on/${TOTAL_FRAMES}':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+              5)
+                MOTION="zoompan=z='min(zoom+0.00050,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+              6)
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(1-on/${TOTAL_FRAMES})':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+              *)
+                MOTION="zoompan=z='min(zoom+0.00035,1.05)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1320:fps=${FPS}"
+                ;;
+            esac
+
             ffmpeg -hide_banner -loglevel error -y \
               -loop 1 \
               -t "$CLIP_DURATION" \
               -i "input/scene${i}.png" \
-              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30" \
-              -r 30 \
+              -vf "scale=1400:1712:force_original_aspect_ratio=increase,crop=1400:1712,${MOTION},pad=1080:1920:0:${TOP_BLACK_HEIGHT}:black,setsar=1,fps=${FPS}" \
+              -r "$FPS" \
               -an \
               -c:v libx264 \
               -preset medium \
@@ -1358,7 +1494,11 @@ jobs:
           echo "Narration duration: $AUDIO_DURATION"
           echo "Final video duration: $VIDEO_DURATION"
           echo "Scene transition: dissolve/crossfade 0.40s"
-          echo "Title overlay Y (iPhone safe area): $TITLE_OVERLAY_Y"
+          echo "Top black area: ${TOP_BLACK_HEIGHT}px"
+          echo "Video area: ${VIDEO_AREA_HEIGHT}px"
+          echo "Bottom black area: ${BOTTOM_BLACK_HEIGHT}px"
+          echo "Title overlay Y: $TITLE_OVERLAY_Y"
+          echo "Info card Y: $INFO_CARD_Y"
           echo "BGM fade-out start: $FADE_OUT_START"
           echo "BGM fade-out duration: $FADE_OUT_DURATION"
           echo "BGM volume: 0.07"
@@ -1369,12 +1509,15 @@ jobs:
             -stream_loop -1 \
             -i assets/bgm.mp3 \
             -loop 1 \
+            -i input/hook_overlay.png \
+            -loop 1 \
             -i input/title_overlay.png \
             -loop 1 \
             -i input/info_card.png \
             -filter_complex "\
-              [0:v:0][3:v:0]overlay=0:${TITLE_OVERLAY_Y}:format=auto[titled];\
-              [titled][4:v:0]overlay=(main_w-overlay_w)/2:1360:format=auto[carded];\
+              [0:v:0][3:v:0]overlay=0:0:format=auto[hooked];\
+              [hooked][4:v:0]overlay=0:${TITLE_OVERLAY_Y}:format=auto[titled];\
+              [titled][5:v:0]overlay=(main_w-overlay_w)/2:${INFO_CARD_Y}:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
