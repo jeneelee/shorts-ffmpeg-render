@@ -1280,6 +1280,8 @@ jobs:
           CROSSFADE_DURATION="0.40"
           FPS="30"
 
+          # xfade 최종 길이가 VIDEO_DURATION과 정확히 맞도록
+          # 각 이미지 클립의 목표 길이를 계산합니다.
           CLIP_DURATION=$(python - "$IMAGE_COUNT" "$VIDEO_DURATION" "$CROSSFADE_DURATION" <<'PY'
           import sys
 
@@ -1303,7 +1305,9 @@ jobs:
               ) / image_count
 
           if clip_duration <= crossfade_duration:
-              raise SystemExit("Clip duration must be longer than crossfade duration")
+              raise SystemExit(
+                  "Clip duration must be longer than crossfade duration"
+              )
 
           print(f"{clip_duration:.6f}")
           PY
@@ -1311,8 +1315,10 @@ jobs:
 
           TOTAL_FRAMES=$(python - "$CLIP_DURATION" "$FPS" <<'PY'
           import sys
+
           duration = float(sys.argv[1])
           fps = int(sys.argv[2])
+
           print(max(2, int(round(duration * fps))))
           PY
           )
@@ -1321,9 +1327,11 @@ jobs:
           printf '%s' "$CROSSFADE_DURATION" > crossfade_duration.txt
 
           echo "Image count: $IMAGE_COUNT"
+          echo "Target video duration: $VIDEO_DURATION"
           echo "Clip duration: $CLIP_DURATION"
           echo "Crossfade duration: $CROSSFADE_DURATION"
-          echo "Motion frames per clip: $TOTAL_FRAMES"
+          echo "FPS: $FPS"
+          echo "Frames per clip: $TOTAL_FRAMES"
           echo "Layout: black 300 / video 1320 / black 300"
 
           for i in $(seq 1 "$IMAGE_COUNT"); do
@@ -1332,42 +1340,60 @@ jobs:
               exit 1
             fi
 
+            # 정지 이미지 1장으로 TOTAL_FRAMES만큼 실제 프레임을 생성합니다.
+            # trim + setpts로 각 클립의 길이와 PTS를 xfade 전에 정규화합니다.
             case "$i" in
               1)
-                MOTION="zoompan=z='min(zoom+0.00045,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='min(1+0.055*on/${TOTAL_FRAMES},1.055)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
               2)
-                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)*on/${TOTAL_FRAMES}':y='(ih-ih/zoom)/2':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)*on/${TOTAL_FRAMES}':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
               3)
-                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)*(1-on/${TOTAL_FRAMES})':y='(ih-ih/zoom)/2':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)*(1-on/${TOTAL_FRAMES})':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
               4)
-                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*on/${TOTAL_FRAMES}':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*on/${TOTAL_FRAMES}':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
               5)
-                MOTION="zoompan=z='min(zoom+0.00050,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='min(1+0.060*on/${TOTAL_FRAMES},1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
               6)
-                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(1-on/${TOTAL_FRAMES})':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='1.05':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(1-on/${TOTAL_FRAMES})':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
               *)
-                MOTION="zoompan=z='min(zoom+0.00035,1.05)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1320:fps=${FPS}"
+                MOTION="zoompan=z='min(1+0.045*on/${TOTAL_FRAMES},1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=1080x1320:fps=${FPS}"
                 ;;
             esac
 
-            ffmpeg -hide_banner -loglevel error -y \
-              -loop 1 \
-              -t "$CLIP_DURATION" \
-              -i "input/scene${i}.png" \
-              -vf "scale=1400:1712:force_original_aspect_ratio=increase,crop=1400:1712,${MOTION},pad=1080:1920:0:${TOP_BLACK_HEIGHT}:black,setsar=1,fps=${FPS}" \
-              -r "$FPS" \
-              -an \
-              -c:v libx264 \
-              -preset medium \
-              -crf 20 \
-              -pix_fmt yuv420p \
-              "clips/clip${i}.mp4"
+            ffmpeg -hide_banner -loglevel error -y               -i "input/scene${i}.png"               -vf "scale=1400:1712:force_original_aspect_ratio=increase,crop=1400:1712,${MOTION},trim=duration=${CLIP_DURATION},setpts=PTS-STARTPTS,pad=1080:1920:0:${TOP_BLACK_HEIGHT}:black,setsar=1,fps=${FPS}"               -an               -c:v libx264               -preset medium               -crf 20               -pix_fmt yuv420p               -movflags +faststart               "clips/clip${i}.mp4"
+
+            if [ ! -s "clips/clip${i}.mp4" ]; then
+              echo "Failed to create clip: clips/clip${i}.mp4"
+              exit 1
+            fi
+
+            ACTUAL_CLIP_DURATION=$(ffprobe               -v error               -show_entries format=duration               -of default=noprint_wrappers=1:nokey=1               "clips/clip${i}.mp4")
+
+            python - "$i" "$CLIP_DURATION" "$ACTUAL_CLIP_DURATION" <<'PY'
+          import sys
+
+          scene_index = int(sys.argv[1])
+          expected = float(sys.argv[2])
+          actual = float(sys.argv[3])
+          tolerance = 0.12
+
+          if abs(expected - actual) > tolerance:
+              raise SystemExit(
+                  f"Clip {scene_index} duration mismatch: "
+                  f"expected {expected:.3f}s, got {actual:.3f}s"
+              )
+
+          print(
+              f"Validated clip {scene_index}: "
+              f"{actual:.3f}s (target {expected:.3f}s)"
+          )
+          PY
           done
 
       - name: Create smooth crossfade scene video
@@ -1396,7 +1422,18 @@ jobs:
           fade_duration = float(sys.argv[3])
 
           filters = []
-          previous = "[0:v]"
+
+          # xfade 직전 모든 입력을 동일한 fps/timebase/0-base PTS로 정규화합니다.
+          for index in range(image_count):
+              filters.append(
+                  f"[{index}:v]"
+                  f"fps=30,"
+                  f"settb=AVTB,"
+                  f"setpts=PTS-STARTPTS"
+                  f"[in{index}]"
+              )
+
+          previous = "[in0]"
 
           for index in range(1, image_count):
               offset = index * (clip_duration - fade_duration)
@@ -1407,7 +1444,7 @@ jobs:
               )
 
               filters.append(
-                  f"{previous}[{index}:v]"
+                  f"{previous}[in{index}]"
                   f"xfade=transition=fade:"
                   f"duration={fade_duration:.6f}:"
                   f"offset={offset:.6f}"
