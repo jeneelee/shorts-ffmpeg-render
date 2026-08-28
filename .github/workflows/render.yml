@@ -668,15 +668,15 @@ jobs:
               hook_draw,
               hook_lines,
               meaning_font_path,
-              max_size=90,
-              min_size=56,
-              max_width=960,
+              max_size=104,
+              min_size=62,
+              max_width=972,
           )
 
           white_fill = (255, 255, 255, 255)
           red_fill = (233, 41, 36, 255)
           shadow_fill = (0, 0, 0, 165)
-          hook_line_gap = 2
+          hook_line_gap = 4
 
           line_metrics = []
           total_hook_h = 0
@@ -1229,35 +1229,37 @@ jobs:
               exit 1
             fi
 
-            # 떨림을 줄이기 위해 고해상도 여유 캔버스에서 켄 번스 모션을 만들고
-            # 이동 좌표를 trunc()로 안정화한 뒤 최종 해상도로 크롭합니다.
+            # 떨림을 더 확실히 줄이기 위해 2배 이상 큰 작업 캔버스에서 모션을 만든 뒤
+            # 최종 1080x1320으로 다운스케일합니다.
+            # 이전의 trunc() 좌표 고정은 미세 떨림 대신 계단식 움직임을 만들 수 있어 제거하고,
+            # cosine easing으로 시작과 끝을 부드럽게 처리합니다.
             case "$i" in
               1)
-                MOTION="zoompan=z='min(1+0.045*on/${TOTAL_FRAMES},1.045)':x='trunc(iw/2-(iw/zoom/2))':y='trunc(ih/2-(ih/zoom/2))':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.050+0.040*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               2)
-                MOTION="zoompan=z='1.040':x='trunc((iw-iw/zoom)*(0.12+0.20*on/${TOTAL_FRAMES}))':y='trunc((ih-ih/zoom)/2)':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.075':x='(iw-iw/zoom)*(0.10+0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               3)
-                MOTION="zoompan=z='1.040':x='trunc((iw-iw/zoom)*(0.38-0.20*on/${TOTAL_FRAMES}))':y='trunc((ih-ih/zoom)/2)':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.075':x='(iw-iw/zoom)*(0.26-0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               4)
-                MOTION="zoompan=z='1.036':x='trunc((iw-iw/zoom)/2)':y='trunc((ih-ih/zoom)*(0.10+0.20*on/${TOTAL_FRAMES}))':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.070':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.10+0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               5)
-                MOTION="zoompan=z='max(1.055-0.040*on/${TOTAL_FRAMES},1.015)':x='trunc(iw/2-(iw/zoom/2))':y='trunc(ih/2-(ih/zoom/2))':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.092-0.052*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               6)
-                MOTION="zoompan=z='1.036':x='trunc((iw-iw/zoom)/2)':y='trunc((ih-ih/zoom)*(0.34-0.20*on/${TOTAL_FRAMES}))':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.070':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.26-0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               *)
-                MOTION="zoompan=z='min(1+0.042*on/${TOTAL_FRAMES},1.042)':x='trunc(iw/2-(iw/zoom/2))':y='trunc(ih/2-(ih/zoom/2))':d=${TOTAL_FRAMES}:s=1400x1712:fps=${FPS}"
+                MOTION="zoompan=z='1.048+0.036*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
             esac
 
             ffmpeg -hide_banner -loglevel error -y \
               -i "input/scene${i}.png" \
-              -vf "scale=2200:2689:force_original_aspect_ratio=increase,crop=2200:2689,${MOTION},crop=1080:1320:(iw-1080)/2:(ih-1320)/2,trim=duration=${CLIP_DURATION},setpts=PTS-STARTPTS,pad=1080:1920:0:${TOP_BLACK_HEIGHT}:black,setsar=1,fps=${FPS}" \
+              -vf "scale=2600:3178:force_original_aspect_ratio=increase,crop=2600:3178,${MOTION},scale=1080:1320:flags=lanczos,trim=duration=${CLIP_DURATION},setpts=PTS-STARTPTS,pad=1080:1920:0:${TOP_BLACK_HEIGHT}:black,setsar=1,fps=${FPS}" \
               -an \
               -c:v libx264 \
               -preset medium \
