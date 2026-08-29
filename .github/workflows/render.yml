@@ -63,7 +63,7 @@ jobs:
       VIDEO_AREA_HEIGHT: "1320"
       BOTTOM_BLACK_HEIGHT: "300"
       TITLE_OVERLAY_Y: "292"
-      INFO_CARD_Y: "1685"
+      INFO_CARD_Y: "1640"
 
     steps:
       - name: Checkout repository
@@ -716,7 +716,6 @@ jobs:
           subtitle_fill = (255, 248, 234, 255)
           subtitle_outline = (26, 18, 13, 255)
           subtitle_shadow = (0, 0, 0, 120)
-          divider_color = (102, 79, 56, 185)
 
           display_hanja = hanja if hanja else ""
           idiom_font, hanja_font, title_gap, idiom_w, hanja_w, title_line_h = fit_pair_fonts(
@@ -789,23 +788,10 @@ jobs:
                   stroke_fill=subtitle_outline,
               )
 
-          current_y = title_y + title_line_h + 10
-          center_x = title_width // 2
-          line_y = current_y
-          draw.line((275, line_y, center_x - 42, line_y), fill=divider_color, width=2)
-          draw.line((center_x + 42, line_y, 805, line_y), fill=divider_color, width=2)
-          draw.polygon(
-              [
-                  (center_x, line_y - 7),
-                  (center_x + 8, line_y),
-                  (center_x, line_y + 7),
-                  (center_x - 8, line_y),
-              ],
-              outline=divider_color,
-              fill=(0, 0, 0, 0),
-          )
-
-          meaning_y = line_y + 12
+          # 사자성어/한자와 뜻 사이의 장식 구분선은 사용하지 않습니다.
+          # 제목 아래에 충분한 여백만 두어 더 깔끔하게 연결합니다.
+          current_y = title_y + title_line_h + 12
+          meaning_y = current_y + 2
           meaning_line_spacing = 4
           meaning_shadow_layer = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
           meaning_shadow_draw = ImageDraw.Draw(meaning_shadow_layer)
@@ -1235,25 +1221,32 @@ jobs:
             # cosine easing으로 시작과 끝을 부드럽게 처리합니다.
             case "$i" in
               1)
-                MOTION="zoompan=z='1.050+0.040*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 중앙 줌인: 장면을 천천히 끌어당기는 기본 패턴
+                MOTION="zoompan=z='1.035+0.080*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               2)
-                MOTION="zoompan=z='1.075':x='(iw-iw/zoom)*(0.10+0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 좌 -> 우 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)*(0.08+0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               3)
-                MOTION="zoompan=z='1.075':x='(iw-iw/zoom)*(0.26-0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 우 -> 좌 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)*(0.84-0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               4)
-                MOTION="zoompan=z='1.070':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.10+0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 상 -> 하 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.08+0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               5)
-                MOTION="zoompan=z='1.092-0.052*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 중앙 줌아웃: 리듬 변화용
+                MOTION="zoompan=z='1.120-0.075*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               6)
-                MOTION="zoompan=z='1.070':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.26-0.16*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 하 -> 상 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.84-0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
               *)
-                MOTION="zoompan=z='1.048+0.036*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                # 대각선: 좌하 -> 우상. 마지막 장면에 약한 시선 이동을 줍니다.
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)*(0.10+0.70*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)*(0.80-0.65*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
                 ;;
             esac
 
@@ -1435,7 +1428,7 @@ jobs:
           echo "Narration duration: $AUDIO_DURATION"
           echo "Final video duration: $VIDEO_DURATION"
           echo "Scene transition: dissolve/crossfade 0.40s"
-          echo "Motion profile: restored Ken Burns motion with anti-shake stabilization"
+          echo "Motion profile: enhanced Ken Burns - zoom / horizontal / vertical / diagonal with anti-shake stabilization"
           echo "Top black area: ${TOP_BLACK_HEIGHT}px"
           echo "Video area: ${VIDEO_AREA_HEIGHT}px"
           echo "Bottom black area: ${BOTTOM_BLACK_HEIGHT}px"
