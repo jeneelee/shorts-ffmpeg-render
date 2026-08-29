@@ -791,7 +791,7 @@ jobs:
           # 사자성어/한자와 뜻 사이의 장식 구분선은 사용하지 않습니다.
           # 제목 아래에 충분한 여백만 두어 더 깔끔하게 연결합니다.
           current_y = title_y + title_line_h + 12
-          meaning_y = current_y + 2
+          meaning_y = current_y + 5
           meaning_line_spacing = 4
           meaning_shadow_layer = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
           meaning_shadow_draw = ImageDraw.Draw(meaning_shadow_layer)
