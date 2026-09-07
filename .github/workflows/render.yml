@@ -35,6 +35,11 @@ on:
         description: Korean history relevance shown in the info card
         required: true
         type: string
+      use_closing:
+        description: Whether to append the separately generated closing TTS
+        required: false
+        default: "false"
+        type: string
 
 permissions:
   contents: write
@@ -53,6 +58,7 @@ jobs:
       DIFFICULTY: ${{ github.event.inputs.difficulty }}
       USAGE_FREQUENCY: ${{ github.event.inputs.usage_frequency }}
       KOREAN_HISTORY: ${{ github.event.inputs.korean_history }}
+      USE_CLOSING: ${{ github.event.inputs.use_closing }}
       END_PADDING_SECONDS: "1.2"
 
       # 1080x1920 레이아웃
@@ -115,6 +121,7 @@ jobs:
           echo "DIFFICULTY=${DIFFICULTY}"
           echo "USAGE_FREQUENCY=${USAGE_FREQUENCY}"
           echo "KOREAN_HISTORY=${KOREAN_HISTORY}"
+          echo "USE_CLOSING=${USE_CLOSING:-false}"
 
       - name: Prepare folders and service account
         env:
@@ -265,27 +272,55 @@ jobs:
           print("Downloaded all 7 scene images successfully.")
           PY
 
-      - name: Download TTS audio from Google Drive
+      - name: Download and prepare TTS audio from Google Drive
         env:
           AUDIO_FOLDER_ID: ${{ secrets.AUDIO_FOLDER_ID }}
         run: |
+          set -euo pipefail
+
           python - <<'PY'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaIoBaseDownload
           import io
           import os
+          import shutil
+          import subprocess
           import time
 
           JOB_ID = os.environ.get("JOB_ID", "").strip()
           AUDIO_FOLDER_ID = os.environ.get("AUDIO_FOLDER_ID", "").strip()
+          USE_CLOSING_RAW = os.environ.get("USE_CLOSING", "false").strip().lower()
+
           SCOPES = ["https://www.googleapis.com/auth/drive"]
+          MAX_ATTEMPTS = 6
+          WAIT_SECONDS = 5
+          CLOSING_GAP_SECONDS = 0.25
 
           if not JOB_ID:
               raise Exception("JOB_ID is empty")
 
           if not AUDIO_FOLDER_ID:
               raise Exception("AUDIO_FOLDER_ID secret is empty")
+
+          if USE_CLOSING_RAW in {"true", "1", "yes", "on"}:
+              use_closing = True
+          elif USE_CLOSING_RAW in {"false", "0", "no", "off", ""}:
+              use_closing = False
+          else:
+              raise Exception(
+                  f"Invalid use_closing value: {USE_CLOSING_RAW!r}. "
+                  f"Expected true or false."
+              )
+
+          main_names = {
+              f"{JOB_ID}_voice",
+              f"{JOB_ID}_voice.mp3",
+          }
+          closing_names = {
+              f"{JOB_ID}_voice_closing",
+              f"{JOB_ID}_voice_closing.mp3",
+          }
 
           creds = service_account.Credentials.from_service_account_file(
               "service-account.json",
@@ -301,9 +336,26 @@ jobs:
               f"and name contains '{safe_job_id}_voice'"
           )
 
-          files = []
+          def latest_exact(files, allowed_names):
+              matches = [
+                  file_info
+                  for file_info in files
+                  if file_info.get("name", "") in allowed_names
+              ]
 
-          for attempt in range(1, 7):
+              if not matches:
+                  return None
+
+              matches.sort(
+                  key=lambda file_info: file_info.get("createdTime", ""),
+                  reverse=True,
+              )
+              return matches[0]
+
+          selected_main = None
+          selected_closing = None
+
+          for attempt in range(1, MAX_ATTEMPTS + 1):
               results = drive.files().list(
                   q=query,
                   fields="files(id,name,createdTime)",
@@ -311,40 +363,194 @@ jobs:
               ).execute()
 
               files = results.get("files", [])
+              selected_main = latest_exact(files, main_names)
+              selected_closing = latest_exact(files, closing_names)
 
-              if files:
-                  files.sort(
-                      key=lambda file_info: file_info.get("createdTime", ""),
-                      reverse=True,
-                  )
-                  print(
-                      f"Found audio file on attempt {attempt}: {files[0]['name']}"
-                  )
-                  break
+              main_label = (
+                  f"{selected_main['name']} "
+                  f"({selected_main.get('createdTime', 'unknown')})"
+                  if selected_main
+                  else "not found"
+              )
+              closing_label = (
+                  f"{selected_closing['name']} "
+                  f"({selected_closing.get('createdTime', 'unknown')})"
+                  if selected_closing
+                  else "not found"
+              )
 
               print(
-                  f"No audio file found yet for job_id={JOB_ID}. "
-                  f"Retry {attempt}/6..."
+                  f"Attempt {attempt}/{MAX_ATTEMPTS}: "
+                  f"main={main_label}, closing={closing_label}, "
+                  f"use_closing={use_closing}"
               )
-              time.sleep(5)
 
-          if not files:
-              raise Exception(f"No audio file found for job_id={JOB_ID}")
+              if selected_main is None:
+                  ready = False
+              elif not use_closing:
+                  ready = True
+              elif selected_closing is None:
+                  ready = False
+              else:
+                  main_created = selected_main.get("createdTime", "")
+                  closing_created = selected_closing.get("createdTime", "")
 
-          file_info = files[0]
-          request = drive.files().get_media(fileId=file_info["id"])
+                  if not main_created or not closing_created:
+                      ready = False
+                  else:
+                      # 같은 job_id 재실행 시 예전 closing을 잘못 붙이지 않도록
+                      # closing이 최신 main과 같거나 더 새로울 때만 유효합니다.
+                      ready = closing_created >= main_created
 
-          with io.FileIO("input/audio.mp3", "wb") as file_handle:
-              downloader = MediaIoBaseDownload(file_handle, request)
-              done = False
+                      if not ready:
+                          print(
+                              "Closing file is older than the latest main audio. "
+                              "Waiting for the current closing file..."
+                          )
 
-              while not done:
-                  _, done = downloader.next_chunk()
+              if ready:
+                  break
 
-          if not os.path.exists("input/audio.mp3") or os.path.getsize("input/audio.mp3") == 0:
-              raise Exception("Downloaded audio file is empty")
+              if attempt < MAX_ATTEMPTS:
+                  time.sleep(WAIT_SECONDS)
 
-          print(f"Downloaded audio: {file_info['name']} -> input/audio.mp3")
+          if selected_main is None:
+              raise Exception(
+                  f"No exact main audio file found for job_id={JOB_ID}. "
+                  f"Expected one of: {sorted(main_names)}"
+              )
+
+          if use_closing:
+              if selected_closing is None:
+                  raise Exception(
+                      f"use_closing=true but no exact closing audio file was found "
+                      f"for job_id={JOB_ID}. "
+                      f"Expected one of: {sorted(closing_names)}"
+                  )
+
+              main_created = selected_main.get("createdTime", "")
+              closing_created = selected_closing.get("createdTime", "")
+
+              if not main_created or not closing_created:
+                  raise Exception(
+                      "createdTime is missing from main or closing audio metadata."
+                  )
+
+              if closing_created < main_created:
+                  raise Exception(
+                      "Refusing to use stale closing audio: "
+                      f"main={selected_main['name']} ({main_created}), "
+                      f"closing={selected_closing['name']} ({closing_created})"
+                  )
+
+          def download_file(file_info, output_path):
+              request = drive.files().get_media(fileId=file_info["id"])
+
+              with io.FileIO(output_path, "wb") as file_handle:
+                  downloader = MediaIoBaseDownload(file_handle, request)
+                  done = False
+
+                  while not done:
+                      _, done = downloader.next_chunk()
+
+              if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                  raise Exception(f"Downloaded audio file is empty: {output_path}")
+
+              print(
+                  f"Downloaded audio: {file_info['name']} "
+                  f"({file_info.get('createdTime', 'unknown')}) "
+                  f"-> {output_path}"
+              )
+
+          os.makedirs("input", exist_ok=True)
+
+          main_path = "input/audio_main.mp3"
+          closing_path = "input/audio_closing.mp3"
+          output_path = "input/audio.mp3"
+
+          download_file(selected_main, main_path)
+
+          if not use_closing:
+              shutil.copyfile(main_path, output_path)
+              print(
+                  "use_closing=false: using exact main TTS only "
+                  f"-> {output_path}"
+              )
+          else:
+              download_file(selected_closing, closing_path)
+
+              filter_complex = (
+                  "[0:a]"
+                  "aresample=44100,"
+                  "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                  "asetpts=PTS-STARTPTS"
+                  "[main];"
+                  f"anullsrc=r=44100:cl=stereo:d={CLOSING_GAP_SECONDS}"
+                  "[silence];"
+                  "[1:a]"
+                  "aresample=44100,"
+                  "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                  "asetpts=PTS-STARTPTS"
+                  "[closing];"
+                  "[main][silence][closing]"
+                  "concat=n=3:v=0:a=1"
+                  "[outa]"
+              )
+
+              subprocess.run(
+                  [
+                      "ffmpeg",
+                      "-hide_banner",
+                      "-loglevel",
+                      "error",
+                      "-y",
+                      "-i",
+                      main_path,
+                      "-i",
+                      closing_path,
+                      "-filter_complex",
+                      filter_complex,
+                      "-map",
+                      "[outa]",
+                      "-c:a",
+                      "libmp3lame",
+                      "-b:a",
+                      "192k",
+                      output_path,
+                  ],
+                  check=True,
+              )
+
+              if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                  raise Exception("Merged audio file was not created or is empty")
+
+              print(
+                  "use_closing=true: merged "
+                  f"main + {CLOSING_GAP_SECONDS:.2f}s silence + closing "
+                  f"-> {output_path}"
+              )
+
+          final_duration = subprocess.check_output(
+              [
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-show_entries",
+                  "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  output_path,
+              ],
+              text=True,
+          ).strip()
+
+          if not final_duration:
+              raise Exception("Could not read prepared audio duration")
+
+          if float(final_duration) <= 0:
+              raise Exception("Prepared audio duration must be greater than zero")
+
+          print(f"Prepared TTS duration: {float(final_duration):.3f}s")
           PY
 
       - name: Get audio and final video duration
