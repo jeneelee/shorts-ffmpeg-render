@@ -301,61 +301,108 @@ jobs:
               f"and name contains '{safe_job_id}_voice'"
           )
 
-          files = []
+          allowed_names = {
+              f"{JOB_ID}_voice",
+              f"{JOB_ID}_voice.mp3",
+              f"{JOB_ID}_voice.wav",
+          }
+
+          selected = None
 
           for attempt in range(1, 7):
               results = drive.files().list(
                   q=query,
-                  fields="files(id,name,createdTime)",
+                  fields="files(id,name,createdTime,mimeType)",
                   pageSize=100,
               ).execute()
 
-              files = results.get("files", [])
+              files = [
+                  file_info
+                  for file_info in results.get("files", [])
+                  if file_info.get("name", "") in allowed_names
+              ]
 
               if files:
                   files.sort(
                       key=lambda file_info: file_info.get("createdTime", ""),
                       reverse=True,
                   )
+                  selected = files[0]
                   print(
-                      f"Found audio file on attempt {attempt}: {files[0]['name']}"
+                      f"Found exact audio file on attempt {attempt}: "
+                      f"{selected['name']}"
                   )
                   break
 
               print(
-                  f"No audio file found yet for job_id={JOB_ID}. "
+                  f"No exact audio file found yet for job_id={JOB_ID}. "
+                  f"Expected one of {sorted(allowed_names)}. "
                   f"Retry {attempt}/6..."
               )
               time.sleep(5)
 
-          if not files:
-              raise Exception(f"No audio file found for job_id={JOB_ID}")
+          if not selected:
+              raise Exception(
+                  f"No exact main audio file found for job_id={JOB_ID}. "
+                  f"Expected one of: {sorted(allowed_names)}"
+              )
 
-          file_info = files[0]
-          request = drive.files().get_media(fileId=file_info["id"])
+          file_name = selected.get("name", "")
+          mime_type = selected.get("mimeType", "")
+          lower_name = file_name.lower()
 
-          with io.FileIO("input/audio.mp3", "wb") as file_handle:
+          if lower_name.endswith(".wav"):
+              extension = "wav"
+          elif lower_name.endswith(".mp3"):
+              extension = "mp3"
+          elif mime_type in {"audio/wav", "audio/x-wav"}:
+              extension = "wav"
+          elif mime_type in {"audio/mpeg", "audio/mp3"}:
+              extension = "mp3"
+          else:
+              raise Exception(
+                  f"Unsupported TTS audio format: "
+                  f"name={file_name}, mimeType={mime_type}"
+              )
+
+          output_path = f"input/audio.{extension}"
+          request = drive.files().get_media(fileId=selected["id"])
+
+          with io.FileIO(output_path, "wb") as file_handle:
               downloader = MediaIoBaseDownload(file_handle, request)
               done = False
 
               while not done:
                   _, done = downloader.next_chunk()
 
-          if not os.path.exists("input/audio.mp3") or os.path.getsize("input/audio.mp3") == 0:
-              raise Exception("Downloaded audio file is empty")
+          if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+              raise Exception(f"Downloaded audio file is empty: {output_path}")
 
-          print(f"Downloaded audio: {file_info['name']} -> input/audio.mp3")
+          with open("audio_path.txt", "w", encoding="utf-8") as file:
+              file.write(output_path)
+
+          print(
+              f"Downloaded audio: {file_name} -> {output_path} "
+              f"(mimeType={mime_type})"
+          )
           PY
 
       - name: Get audio and final video duration
         run: |
           set -euo pipefail
 
+          AUDIO_PATH=$(cat audio_path.txt)
+
+          if [ -z "$AUDIO_PATH" ] || [ ! -s "$AUDIO_PATH" ]; then
+            echo "Prepared audio path is missing or empty: $AUDIO_PATH"
+            exit 1
+          fi
+
           AUDIO_DURATION=$(ffprobe \
             -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
-            input/audio.mp3)
+            "$AUDIO_PATH")
 
           if [ -z "$AUDIO_DURATION" ]; then
             echo "Could not read audio duration."
@@ -1405,8 +1452,14 @@ jobs:
           set -euo pipefail
 
           OUTPUT_VIDEO="output/short_${JOB_ID}.mp4"
+          AUDIO_PATH=$(cat audio_path.txt)
           AUDIO_DURATION=$(cat audio_duration.txt)
           VIDEO_DURATION=$(cat video_duration.txt)
+
+          if [ -z "$AUDIO_PATH" ] || [ ! -s "$AUDIO_PATH" ]; then
+            echo "Prepared audio path is missing or empty: $AUDIO_PATH"
+            exit 1
+          fi
 
           FADE_OUT_DURATION=$(python - "$VIDEO_DURATION" <<'PY'
           import sys
@@ -1440,7 +1493,7 @@ jobs:
 
           ffmpeg -hide_banner -loglevel error -y \
             -i input/scenes_xfade.mp4 \
-            -i input/audio.mp3 \
+            -i "$AUDIO_PATH" \
             -stream_loop -1 \
             -i assets/bgm.mp3 \
             -loop 1 \
