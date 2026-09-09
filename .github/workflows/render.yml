@@ -1490,6 +1490,7 @@ jobs:
           echo "BGM fade-out start: $FADE_OUT_START"
           echo "BGM fade-out duration: $FADE_OUT_DURATION"
           echo "BGM volume: 0.07"
+          echo "Voice clarity: 48kHz / high-pass 80Hz / presence +2dB at 3.2kHz / loudness -18 LUFS"
 
           ffmpeg -hide_banner -loglevel error -y \
             -i input/scenes_xfade.mp4 \
@@ -1507,10 +1508,14 @@ jobs:
               [hooked][4:v:0]overlay=0:${TITLE_OVERLAY_Y}:format=auto[titled];\
               [titled][5:v:0]overlay=(main_w-overlay_w)/2:${INFO_CARD_Y}:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
-              [1:a:0]aresample=async=1:first_pts=0,volume=1.0,\
+              [1:a:0]aresample=48000:async=1:first_pts=0,\
+              highpass=f=80,\
+              equalizer=f=3200:t=q:w=1:g=2,\
+              loudnorm=I=-18:TP=-2:LRA=7,\
+              aresample=48000,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
               [2:a:0]atrim=0:${VIDEO_DURATION},asetpts=PTS-STARTPTS,\
-              aresample=async=1:first_pts=0,volume=0.07,\
+              aresample=48000:async=1:first_pts=0,volume=0.07,\
               afade=t=in:st=0:d=1,\
               afade=t=out:st=${FADE_OUT_START}:d=${FADE_OUT_DURATION}[bgm];\
               [voice][bgm]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,\
@@ -1524,6 +1529,7 @@ jobs:
             -pix_fmt yuv420p \
             -c:a aac \
             -b:a 192k \
+            -ar 48000 \
             -movflags +faststart \
             "$OUTPUT_VIDEO"
 
