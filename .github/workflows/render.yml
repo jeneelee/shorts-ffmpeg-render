@@ -1490,7 +1490,7 @@ jobs:
           echo "BGM fade-out start: $FADE_OUT_START"
           echo "BGM fade-out duration: $FADE_OUT_DURATION"
           echo "BGM volume: 0.07"
-          echo "Voice cleanup: 48kHz / high-pass 70Hz / low-pass 9.5kHz / mild de-esser / loudness -18 LUFS"
+          echo "Voice processing: clean Chirp source / 48kHz resample only / no EQ / no de-esser / no loudness processing"
 
           ffmpeg -hide_banner -loglevel error -y \
             -i input/scenes_xfade.mp4 \
@@ -1509,11 +1509,6 @@ jobs:
               [titled][5:v:0]overlay=(main_w-overlay_w)/2:${INFO_CARD_Y}:format=auto[carded];\
               [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
               [1:a:0]aresample=48000:async=1:first_pts=0,\
-              highpass=f=70,\
-              lowpass=f=9500,\
-              deesser=i=0.25:m=0.35:f=0.55,\
-              loudnorm=I=-18:TP=-2:LRA=7,\
-              aresample=48000,\
               apad=pad_dur=${END_PADDING_SECONDS}[voice];\
               [2:a:0]atrim=0:${VIDEO_DURATION},asetpts=PTS-STARTPTS,\
               aresample=48000:async=1:first_pts=0,volume=0.07,\
