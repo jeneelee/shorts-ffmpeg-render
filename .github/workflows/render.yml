@@ -1564,13 +1564,85 @@ jobs:
             -of default=noprint_wrappers=1 \
             "$OUTPUT_VIDEO"
 
-      - name: Upload mp4 to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: render-${{ github.event.inputs.job_id }}
-          name: Render ${{ github.event.inputs.job_id }}
-          fail_on_unmatched_files: true
-          files: |
-            output/short_${{ github.event.inputs.job_id }}.mp4
+      - name: Upload mp4 to GitHub Release with retry
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG="render-${JOB_ID}"
+          RELEASE_NAME="Render ${JOB_ID}"
+          FILE="output/short_${JOB_ID}.mp4"
+          ASSET_NAME="short_${JOB_ID}.mp4"
+          MAX_ATTEMPTS=6
+
+          if [ ! -s "$FILE" ]; then
+            echo "Release asset is missing or empty: $FILE"
+            exit 1
+          fi
+
+          echo "Preparing GitHub Release upload"
+          echo "Tag: $TAG"
+          echo "Asset: $FILE"
+          echo "Max attempts: $MAX_ATTEMPTS"
+
+          SUCCESS=0
+
+          for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
+            echo "----------------------------------------"
+            echo "Release upload attempt ${ATTEMPT}/${MAX_ATTEMPTS}"
+
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release already exists: $TAG"
+            else
+              echo "Release not found. Creating: $TAG"
+
+              if gh release create "$TAG"                 --title "$RELEASE_NAME"                 --notes "Automated render ${JOB_ID}"                 --target "$GITHUB_SHA"; then
+                echo "Release created successfully."
+              else
+                echo "Release creation failed on attempt ${ATTEMPT}."
+              fi
+            fi
+
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Uploading asset with --clobber..."
+
+              if gh release upload "$TAG" "$FILE" --clobber; then
+                echo "Asset upload command succeeded."
+
+                ASSET_FOUND=$(gh release view "$TAG"                   --json assets                   --jq ".assets[]?.name"                   | grep -Fx "$ASSET_NAME" || true)
+
+                if [ "$ASSET_FOUND" = "$ASSET_NAME" ]; then
+                  echo "Verified release asset: $ASSET_NAME"
+                  SUCCESS=1
+                  break
+                else
+                  echo "Upload returned success, but asset verification failed."
+                fi
+              else
+                echo "Asset upload failed on attempt ${ATTEMPT}."
+              fi
+            else
+              echo "Release is still unavailable after create/view attempt."
+            fi
+
+            if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+              WAIT_SECONDS=$((15 * ATTEMPT))
+
+              if [ "$WAIT_SECONDS" -gt 60 ]; then
+                WAIT_SECONDS=60
+              fi
+
+              echo "Transient GitHub error suspected."
+              echo "Waiting ${WAIT_SECONDS}s before retry..."
+              sleep "$WAIT_SECONDS"
+            fi
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "GitHub Release upload failed after ${MAX_ATTEMPTS} attempts."
+            exit 1
+          fi
+
+          echo "GitHub Release upload completed successfully."
+          gh release view "$TAG" --json url --jq '.url'
