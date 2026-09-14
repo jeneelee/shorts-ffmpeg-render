@@ -992,77 +992,100 @@ jobs:
               return result
 
           def split_korean_chunk(sentence, max_chars=20):
-              sentence = sentence.strip()
+              """
+              자막 덩어리는 공백(어절) 경계에서만 나눕니다.
+              글자 수 제한보다 단어 보존을 우선하여
+              한 단어/조사/어미를 중간에서 절대 자르지 않습니다.
+              """
+              sentence = re.sub(r"\s+", " ", sentence).strip()
+
+              if not sentence:
+                  return []
 
               if len(sentence) <= max_chars:
                   return [sentence]
 
-              words = sentence.split()
+              words = sentence.split(" ")
               chunks = []
-              current = ""
+              current_words = []
 
-              if len(words) > 1:
-                  for word in words:
-                      candidate = (current + " " + word).strip()
+              for word in words:
+                  word = word.strip()
+                  if not word:
+                      continue
 
-                      if len(candidate) <= max_chars:
-                          current = candidate
-                      else:
-                          if current:
-                              chunks.append(current)
-                          current = word
+                  candidate_words = current_words + [word]
+                  candidate = " ".join(candidate_words)
 
-                  if current:
-                      chunks.append(current)
-              else:
-                  chunks = [
-                      sentence[index:index + max_chars]
-                      for index in range(0, len(sentence), max_chars)
-                  ]
-
-              final_chunks = []
-
-              for chunk in chunks:
-                  if len(chunk) <= max_chars:
-                      final_chunks.append(chunk)
+                  if not current_words or len(candidate) <= max_chars:
+                      current_words = candidate_words
                   else:
-                      final_chunks.extend(
-                          chunk[index:index + max_chars]
-                          for index in range(0, len(chunk), max_chars)
-                      )
+                      chunks.append(" ".join(current_words))
+                      current_words = [word]
 
-              return final_chunks
+              if current_words:
+                  chunks.append(" ".join(current_words))
 
-          def make_caption_text(chunk):
-              chunk = chunk.strip()
+              # 매우 긴 단일 어절이 max_chars를 넘더라도
+              # 글자 중간에서 강제로 자르지 않고 그대로 유지합니다.
+              return [chunk for chunk in chunks if chunk.strip()]
 
-              if len(chunk) <= 16:
+          def make_caption_text(chunk, max_line_chars=16):
+              """
+              화면용 1~2줄 자막도 공백(어절) 경계에서만 줄바꿈합니다.
+              양쪽 줄이 16자 이내인 분할을 우선하고,
+              불가능하면 가장 균형 좋은 어절 경계를 사용합니다.
+              공백이 없는 단일 어절은 절대 중간에서 자르지 않습니다.
+              """
+              chunk = re.sub(r"\s+", " ", chunk).strip()
+
+              if len(chunk) <= max_line_chars:
                   return chunk
 
-              words = chunk.split()
+              words = chunk.split(" ")
 
-              if len(words) >= 2:
-                  best_line1 = ""
-                  best_line2 = ""
-                  smallest_difference = 999
+              # 공백이 없는 한 단어는 길어도 그대로 표시합니다.
+              if len(words) < 2:
+                  return chunk
 
-                  for index in range(1, len(words)):
-                      line1 = " ".join(words[:index])
-                      line2 = " ".join(words[index:])
+              candidates = []
 
-                      if len(line1) <= 16 and len(line2) <= 16:
-                          difference = abs(len(line1) - len(line2))
+              for index in range(1, len(words)):
+                  line1 = " ".join(words[:index]).strip()
+                  line2 = " ".join(words[index:]).strip()
 
-                          if difference < smallest_difference:
-                              smallest_difference = difference
-                              best_line1 = line1
-                              best_line2 = line2
+                  if not line1 or not line2:
+                      continue
 
-                  if best_line1 and best_line2:
-                      return best_line1 + r"\N" + best_line2
+                  fits_both = (
+                      len(line1) <= max_line_chars
+                      and len(line2) <= max_line_chars
+                  )
 
-              middle = len(chunk) // 2
-              return chunk[:middle].strip() + r"\N" + chunk[middle:].strip()
+                  overflow = (
+                      max(0, len(line1) - max_line_chars)
+                      + max(0, len(line2) - max_line_chars)
+                  )
+
+                  balance = abs(len(line1) - len(line2))
+
+                  # 1순위: 두 줄 모두 16자 이내
+                  # 2순위: 넘치는 글자 수 최소
+                  # 3순위: 두 줄 길이 균형
+                  score = (
+                      0 if fits_both else 1,
+                      overflow,
+                      balance,
+                  )
+
+                  candidates.append((score, line1, line2))
+
+              if candidates:
+                  candidates.sort(key=lambda item: item[0])
+                  _, line1, line2 = candidates[0]
+                  return line1 + r"\N" + line2
+
+              return chunk
 
           def ass_time(seconds):
               seconds = max(0, float(seconds))
