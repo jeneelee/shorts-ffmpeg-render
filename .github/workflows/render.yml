@@ -1,3 +1,1539 @@
+name: Render Shorts Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Unique render job ID
+        required: true
+        type: string
+      hook_title:
+        description: Hook title shown in the top black area
+        required: true
+        type: string
+      overlay_title:
+        description: Idiom and Chinese characters shown inside the video area
+        required: true
+        type: string
+      overlay_meaning:
+        description: Short idiom meaning shown below the title
+        required: true
+        type: string
+      voice_script:
+        description: Full narration script used for subtitles
+        required: true
+        type: string
+      difficulty:
+        description: Difficulty rating shown in the info card
+        required: true
+        type: string
+      usage_frequency:
+        description: Usage frequency rating shown in the info card
+        required: true
+        type: string
+      korean_history:
+        description: Korean history relevance shown in the info card
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      JOB_ID: ${{ github.event.inputs.job_id }}
+      HOOK_TITLE: ${{ github.event.inputs.hook_title }}
+      OVERLAY_TITLE: ${{ github.event.inputs.overlay_title }}
+      OVERLAY_MEANING: ${{ github.event.inputs.overlay_meaning }}
+      VOICE_SCRIPT: ${{ github.event.inputs.voice_script }}
+      DIFFICULTY: ${{ github.event.inputs.difficulty }}
+      USAGE_FREQUENCY: ${{ github.event.inputs.usage_frequency }}
+      KOREAN_HISTORY: ${{ github.event.inputs.korean_history }}
+      END_PADDING_SECONDS: "1.2"
+
+      # Google Cloud TTS (GitHub OIDC / Workload Identity Federation)
+      TTS_LANGUAGE_CODE: "ko-KR"
+      TTS_VOICE_NAME: "ko-KR-Chirp3-HD-Enceladus"
+      TTS_SPEAKING_RATE: "1.17"
+      TTS_FINAL_BREAK_MS: "20"
+
+      # 1080x1920 레이아웃
+      # 상단 검정 300px  : 후킹 제목(2줄, 1줄 흰색 / 2줄 빨간색)
+      # 중앙 영상 1320px : 사자성어+한자(한 줄) + 뜻 + 일러스트 + TTS 자막
+      # 하단 검정 300px  : 정보 카드
+      TOP_BLACK_HEIGHT: "300"
+      VIDEO_AREA_HEIGHT: "1320"
+      BOTTOM_BLACK_HEIGHT: "300"
+      TITLE_OVERLAY_Y: "292"
+      INFO_CARD_Y: "1640"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fontconfig fonts-noto-cjk
+          python -m pip install --upgrade pip
+          python -m pip install google-api-python-client google-auth google-cloud-texttospeech pillow
+
+      - name: Validate and register repository fonts
+        run: |
+          set -euo pipefail
+
+          REQUIRED_FONTS=(
+            "fonts/NanumMyeongjoExtraBold.ttf"
+            "fonts/NanumMyeongjoBold.ttf"
+            "fonts/NanumGothicBold.ttf"
+          )
+
+          for font_file in "${REQUIRED_FONTS[@]}"; do
+            if [ ! -s "$font_file" ]; then
+              echo "Required font is missing or empty: $font_file"
+              exit 1
+            fi
+          done
+
+          mkdir -p "$HOME/.local/share/fonts/gangnamhakdang"
+          cp fonts/NanumMyeongjoExtraBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+          cp fonts/NanumMyeongjoBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+          cp fonts/NanumGothicBold.ttf "$HOME/.local/share/fonts/gangnamhakdang/"
+
+          fc-cache -f -v
+
+          echo "Registered repository fonts:"
+          fc-match "NanumMyeongjo ExtraBold"
+          fc-match "NanumMyeongjo"
+          fc-match "NanumGothic"
+          fc-match "Noto Serif CJK KR"
+
+      - name: Confirm workflow inputs
+        run: |
+          echo "JOB_ID=${JOB_ID}"
+          echo "HOOK_TITLE=${HOOK_TITLE}"
+          echo "OVERLAY_TITLE=${OVERLAY_TITLE}"
+          echo "DIFFICULTY=${DIFFICULTY}"
+          echo "USAGE_FREQUENCY=${USAGE_FREQUENCY}"
+          echo "KOREAN_HISTORY=${KOREAN_HISTORY}"
+
+      - name: Prepare folders and service account
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          mkdir -p input clips output
+
+          if [ -z "${GCP_SERVICE_ACCOUNT:-}" ]; then
+            echo "GCP_SERVICE_ACCOUNT secret is empty."
+            exit 1
+          fi
+
+          printf '%s' "$GCP_SERVICE_ACCOUNT" > service-account.json
+
+      - name: Download images from Google Drive temp
+        env:
+          TEMP_FOLDER_ID: ${{ secrets.TEMP_FOLDER_ID }}
+        run: |
+          python - <<'PY'
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
+          import io
+          import os
+          import re
+          import time
+
+          JOB_ID = os.environ.get("JOB_ID", "").strip()
+          TEMP_FOLDER_ID = os.environ.get("TEMP_FOLDER_ID", "").strip()
+
+          EXPECTED_SCENES = 7
+          MAX_ATTEMPTS = 12
+          WAIT_SECONDS = 5
+          SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+          if not JOB_ID:
+              raise Exception("JOB_ID is empty")
+
+          if not TEMP_FOLDER_ID:
+              raise Exception("TEMP_FOLDER_ID secret is empty")
+
+          creds = service_account.Credentials.from_service_account_file(
+              "service-account.json",
+              scopes=SCOPES,
+          )
+
+          drive = build("drive", "v3", credentials=creds)
+
+          safe_job_id = JOB_ID.replace("'", "\\'")
+          query = (
+              f"'{TEMP_FOLDER_ID}' in parents "
+              f"and trashed=false "
+              f"and name contains '{safe_job_id}_scene_'"
+          )
+
+          def scene_number(name: str):
+              match = re.search(r"_scene_(\d+)", name)
+              return int(match.group(1)) if match else None
+
+          selected = {}
+
+          for attempt in range(1, MAX_ATTEMPTS + 1):
+              results = drive.files().list(
+                  q=query,
+                  fields="files(id,name,createdTime)",
+                  pageSize=1000,
+              ).execute()
+
+              files = results.get("files", [])
+              selected = {}
+
+              for file_info in files:
+                  number = scene_number(file_info["name"])
+
+                  if number is None or not 1 <= number <= EXPECTED_SCENES:
+                      continue
+
+                  if number not in selected:
+                      selected[number] = file_info
+                      continue
+
+                  old_created = selected[number].get("createdTime", "")
+                  new_created = file_info.get("createdTime", "")
+
+                  if new_created > old_created:
+                      selected[number] = file_info
+
+              found_numbers = sorted(selected.keys())
+              print(
+                  f"Attempt {attempt}/{MAX_ATTEMPTS}: "
+                  f"found scenes {found_numbers} "
+                  f"({len(found_numbers)}/{EXPECTED_SCENES})"
+              )
+
+              if len(selected) == EXPECTED_SCENES:
+                  print("All 7 scene images found.")
+                  break
+
+              missing = [
+                  number
+                  for number in range(1, EXPECTED_SCENES + 1)
+                  if number not in selected
+              ]
+
+              print(
+                  f"Missing scenes: {missing}. "
+                  f"Waiting {WAIT_SECONDS} seconds..."
+              )
+              time.sleep(WAIT_SECONDS)
+
+          if len(selected) != EXPECTED_SCENES:
+              missing = [
+                  number
+                  for number in range(1, EXPECTED_SCENES + 1)
+                  if number not in selected
+              ]
+              raise Exception(
+                  f"Expected {EXPECTED_SCENES} scene images, "
+                  f"but found {len(selected)}. "
+                  f"Missing scenes: {missing}. "
+                  f"job_id={JOB_ID}"
+              )
+
+          os.makedirs("input", exist_ok=True)
+
+          for scene_idx in range(1, EXPECTED_SCENES + 1):
+              file_info = selected[scene_idx]
+              output_path = f"input/scene{scene_idx}.png"
+
+              print(f"Downloading image: {file_info['name']} -> {output_path}")
+
+              request = drive.files().get_media(fileId=file_info["id"])
+
+              with io.FileIO(output_path, "wb") as file_handle:
+                  downloader = MediaIoBaseDownload(file_handle, request)
+                  done = False
+
+                  while not done:
+                      _, done = downloader.next_chunk()
+
+              if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                  raise Exception(f"Downloaded image is empty: {output_path}")
+
+          with open("image_count.txt", "w", encoding="utf-8") as file:
+              file.write(str(EXPECTED_SCENES))
+
+          print("Downloaded all 7 scene images successfully.")
+          PY
+
+      - name: Authenticate to Google Cloud for TTS
+        id: google-auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: gangnamhakdang-tts
+          workload_identity_provider: projects/906647559150/locations/global/workloadIdentityPools/github-shorts-render/providers/github-actions
+          service_account: gangnamhakdang-tts@gangnamhakdang-tts.iam.gserviceaccount.com
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Generate TTS audio with Google Cloud Chirp 3 HD
+        run: |
+          python - <<'PY'
+          from google.cloud import texttospeech
+          import html
+          import os
+          import re
+
+          raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
+          language_code = os.environ.get("TTS_LANGUAGE_CODE", "ko-KR").strip()
+          voice_name = os.environ.get(
+              "TTS_VOICE_NAME",
+              "ko-KR-Chirp3-HD-Enceladus",
+          ).strip()
+          speaking_rate = float(os.environ.get("TTS_SPEAKING_RATE", "1.17"))
+          final_break_ms = int(os.environ.get("TTS_FINAL_BREAK_MS", "20"))
+
+          if not raw_script:
+              raise Exception("VOICE_SCRIPT is empty")
+
+          if not 0.25 <= speaking_rate <= 2.0:
+              raise Exception(
+                  f"TTS_SPEAKING_RATE must be between 0.25 and 2.0. "
+                  f"Received: {speaking_rate}"
+              )
+
+          if not 0 <= final_break_ms <= 5000:
+              raise Exception(
+                  f"TTS_FINAL_BREAK_MS is out of range: {final_break_ms}"
+              )
+
+          # TTS 입력은 한 줄로 정규화합니다.
+          # voice_script 생성 단계에서 단어 내부 줄바꿈을 금지하고 있으므로,
+          # 여기서는 줄바꿈/연속 공백만 하나의 공백으로 정리합니다.
+          normalized_script = re.sub(r"\s+", " ", raw_script).strip()
+
+          # SSML 안전성을 위해 원문을 XML escape한 뒤,
+          # 마지막 "오늘의 한 수,"에만 짧은 break를 삽입합니다.
+          escaped_script = html.escape(normalized_script, quote=False)
+          marker = "오늘의 한 수,"
+
+          if marker in escaped_script:
+              before, after = escaped_script.rsplit(marker, 1)
+              ssml_body = (
+                  before
+                  + "오늘의 한 수"
+                  + f'<break time="{final_break_ms}ms"/>'
+                  + after
+              )
+          else:
+              # 혹시 고정 문구가 없더라도 영상 전체가 실패하지 않도록
+              # 원문 그대로 합성하되 로그에 경고를 남깁니다.
+              print(
+                  'WARNING: marker "오늘의 한 수," was not found. '
+                  "Synthesizing without the final break."
+              )
+              ssml_body = escaped_script
+
+          ssml = f"<speak>{ssml_body}</speak>"
+
+          client = texttospeech.TextToSpeechClient()
+
+          synthesis_input = texttospeech.SynthesisInput(ssml=ssml)
+
+          voice = texttospeech.VoiceSelectionParams(
+              language_code=language_code,
+              name=voice_name,
+          )
+
+          audio_config = texttospeech.AudioConfig(
+              audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+              speaking_rate=speaking_rate,
+          )
+
+          response = client.synthesize_speech(
+              input=synthesis_input,
+              voice=voice,
+              audio_config=audio_config,
+          )
+
+          output_path = "input/audio.wav"
+
+          with open(output_path, "wb") as file:
+              file.write(response.audio_content)
+
+          if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+              raise Exception(f"Generated TTS audio is empty: {output_path}")
+
+          with open("audio_path.txt", "w", encoding="utf-8") as file:
+              file.write(output_path)
+
+          print("Google Cloud TTS generated successfully.")
+          print(f"Voice: {voice_name}")
+          print(f"Language: {language_code}")
+          print(f"Speaking rate: {speaking_rate}")
+          print(f'Final phrase break: {final_break_ms}ms')
+          print(f"Output: {output_path}")
+          print(f"Audio bytes: {os.path.getsize(output_path)}")
+          PY
+
+      - name: Get audio and final video duration
+        run: |
+          set -euo pipefail
+
+          AUDIO_PATH=$(cat audio_path.txt)
+
+          if [ -z "$AUDIO_PATH" ] || [ ! -s "$AUDIO_PATH" ]; then
+            echo "Prepared audio path is missing or empty: $AUDIO_PATH"
+            exit 1
+          fi
+
+          AUDIO_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$AUDIO_PATH")
+
+          if [ -z "$AUDIO_DURATION" ]; then
+            echo "Could not read audio duration."
+            exit 1
+          fi
+
+          VIDEO_DURATION=$(python - "$AUDIO_DURATION" "$END_PADDING_SECONDS" <<'PY'
+          import sys
+
+          audio_duration = float(sys.argv[1])
+          end_padding = float(sys.argv[2])
+
+          if audio_duration <= 0:
+              raise SystemExit("Audio duration must be greater than zero")
+
+          if end_padding < 0:
+              raise SystemExit("END_PADDING_SECONDS must not be negative")
+
+          print(f"{audio_duration + end_padding:.6f}")
+          PY
+          )
+
+          printf '%s' "$AUDIO_DURATION" > audio_duration.txt
+          printf '%s' "$VIDEO_DURATION" > video_duration.txt
+
+          echo "Narration duration: $AUDIO_DURATION"
+          echo "End padding: $END_PADDING_SECONDS"
+          echo "Final video duration: $VIDEO_DURATION"
+
+      - name: Validate BGM file
+        run: |
+          set -euo pipefail
+
+          BGM_PATH="assets/bgm.mp3"
+
+          if [ ! -s "$BGM_PATH" ]; then
+            echo "BGM file was not found or is empty: $BGM_PATH"
+            exit 1
+          fi
+
+          BGM_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$BGM_PATH")
+
+          if [ -z "$BGM_DURATION" ]; then
+            echo "Could not read BGM duration: $BGM_PATH"
+            exit 1
+          fi
+
+          python - "$BGM_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+
+          if duration <= 0:
+              raise SystemExit("BGM duration must be greater than zero")
+
+          print(f"Validated BGM duration: {duration:.3f} seconds")
+          PY
+
+      - name: Generate hook title, polished title and compact info card
+        run: |
+          python - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+
+          hook_title = os.environ.get("HOOK_TITLE", "").strip()
+          overlay_title = os.environ.get("OVERLAY_TITLE", "").strip()
+          overlay_meaning = os.environ.get("OVERLAY_MEANING", "").strip()
+          difficulty = os.environ.get("DIFFICULTY", "").strip()
+          usage_frequency = os.environ.get("USAGE_FREQUENCY", "").strip()
+          korean_history = os.environ.get("KOREAN_HISTORY", "").strip()
+
+          if not hook_title:
+              raise Exception("HOOK_TITLE is empty")
+          if not overlay_title:
+              raise Exception("OVERLAY_TITLE is empty")
+          if not overlay_meaning:
+              raise Exception("OVERLAY_MEANING is empty")
+
+          FONT_DIR = Path("fonts")
+          TITLE_FONT = FONT_DIR / "NanumMyeongjoExtraBold.ttf"
+          MYEONGJO_FONT = FONT_DIR / "NanumMyeongjoBold.ttf"
+          GOTHIC_FONT = FONT_DIR / "NanumGothicBold.ttf"
+
+          for font_path in (TITLE_FONT, MYEONGJO_FONT, GOTHIC_FONT):
+              if not font_path.is_file() or font_path.stat().st_size == 0:
+                  raise FileNotFoundError(
+                      f"Required repository font is missing or empty: {font_path}"
+                  )
+
+          def fc_match(family):
+              try:
+                  path = subprocess.check_output(
+                      ["fc-match", "-f", "%{file}", family],
+                      text=True,
+                  ).strip()
+                  if path and os.path.exists(path):
+                      return path
+              except Exception:
+                  pass
+              return ""
+
+          # 한자와 한글 타이틀을 같은 분위기로 보이게 하기 위해
+          # Noto Serif CJK를 우선 사용합니다.
+          serif_cjk_font_path = (
+              fc_match("Noto Serif CJK KR")
+              or fc_match("Noto Serif CJK SC")
+              or str(MYEONGJO_FONT)
+          )
+          meaning_font_path = str(MYEONGJO_FONT)
+
+          allowed_ratings = {"★☆☆", "★★☆", "★★★", "☆☆☆"}
+
+          def normalize_rating(value, default):
+              value = re.sub(r"\s+", "", value)
+              return value if value in allowed_ratings else default
+
+          difficulty = normalize_rating(difficulty, "★☆☆")
+          usage_frequency = normalize_rating(usage_frequency, "★☆☆")
+          korean_history = normalize_rating(korean_history, "☆☆☆")
+
+          title_match = re.match(
+              r"^\s*(.*?)\s*[\(\（]\s*(.*?)\s*[\)\）]\s*$",
+              overlay_title,
+          )
+          if title_match:
+              idiom = title_match.group(1).strip()
+              hanja = title_match.group(2).strip()
+          else:
+              idiom = overlay_title.strip()
+              hanja = ""
+
+          def text_box(draw, text, font, stroke_width=0):
+              return draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+
+          def text_size(draw, text, font, stroke_width=0):
+              box = text_box(draw, text, font, stroke_width=stroke_width)
+              return box[2] - box[0], box[3] - box[1]
+
+          def fit_font(draw, text, font_path, max_size, min_size, max_width, stroke_width=0):
+              if not text:
+                  return ImageFont.truetype(font_path, min_size)
+              for size in range(max_size, min_size - 1, -2):
+                  font = ImageFont.truetype(font_path, size)
+                  width, _ = text_size(draw, text, font, stroke_width=stroke_width)
+                  if width <= max_width:
+                      return font
+              return ImageFont.truetype(font_path, min_size)
+
+          def fit_pair_fonts(
+              draw,
+              left_text,
+              right_text,
+              left_font_path,
+              right_font_path,
+              max_size=52,
+              min_size=40,
+              gap=20,
+              max_width=820,
+              stroke_width=4,
+          ):
+              for size in range(max_size, min_size - 1, -2):
+                  left_font = ImageFont.truetype(left_font_path, size)
+                  right_font = ImageFont.truetype(right_font_path, size)
+                  left_w, left_h = text_size(draw, left_text, left_font, stroke_width=stroke_width)
+                  right_w, right_h = text_size(draw, right_text, right_font, stroke_width=stroke_width)
+                  total_w = left_w + (gap if right_text else 0) + right_w
+                  if total_w <= max_width:
+                      return left_font, right_font, gap, left_w, right_w, max(left_h, right_h)
+              size = min_size
+              left_font = ImageFont.truetype(left_font_path, size)
+              right_font = ImageFont.truetype(right_font_path, size)
+              left_w, left_h = text_size(draw, left_text, left_font, stroke_width=stroke_width)
+              right_w, right_h = text_size(draw, right_text, right_font, stroke_width=stroke_width)
+              return left_font, right_font, gap, left_w, right_w, max(left_h, right_h)
+
+          def split_hook_lines(text):
+              text = text.replace("\\n", "\n")
+              text = re.sub(r"\s+", " ", text.replace("\r", "\n")).strip()
+              explicit_lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+              if len(explicit_lines) >= 2:
+                  return explicit_lines[:2]
+              if len(explicit_lines) == 1:
+                  text = explicit_lines[0]
+
+              words = text.split()
+              if len(words) <= 1:
+                  if len(text) <= 12:
+                      return [text]
+                  middle = max(1, len(text) // 2)
+                  split_candidates = sorted(
+                      range(1, len(text)),
+                      key=lambda idx: abs(idx - middle),
+                  )
+                  split_at = split_candidates[0]
+                  return [text[:split_at].strip(), text[split_at:].strip()]
+
+              best = None
+              for idx in range(1, len(words)):
+                  line1 = " ".join(words[:idx]).strip()
+                  line2 = " ".join(words[idx:]).strip()
+                  if not line1 or not line2:
+                      continue
+                  score = (
+                      abs(len(line1) - len(line2)) * 100
+                      + max(0, len(line1) - 13) * 80
+                      + max(0, len(line2) - 13) * 80
+                      + abs(len(line1) - 10) * 5
+                      + abs(len(line2) - 10) * 5
+                  )
+                  if best is None or score < best[0]:
+                      best = (score, line1, line2)
+
+              if best:
+                  return [best[1], best[2]]
+
+              middle = max(1, len(text) // 2)
+              return [text[:middle].strip(), text[middle:].strip()]
+
+          def fit_hook_font(draw, lines, font_path, max_size=90, min_size=56, max_width=960):
+              for size in range(max_size, min_size - 1, -2):
+                  font = ImageFont.truetype(font_path, size)
+                  okay = True
+                  for line in lines:
+                      width, _ = text_size(draw, line, font, stroke_width=0)
+                      if width > max_width:
+                          okay = False
+                          break
+                  if okay:
+                      return font
+              return ImageFont.truetype(font_path, min_size)
+
+          def fit_meaning_lines(
+              draw,
+              text,
+              font_path,
+              max_size=34,
+              min_size=28,
+              max_width=820,
+              preferred_chars=20,
+          ):
+              text = re.sub(r"\s+", " ", text).strip()
+              if not text:
+                  return [""], ImageFont.truetype(font_path, max_size)
+              words = text.split()
+
+              def line_width(line, font):
+                  box = draw.textbbox((0, 0), line, font=font, stroke_width=4)
+                  return box[2] - box[0]
+
+              for size in range(max_size, min_size - 1, -2):
+                  font = ImageFont.truetype(font_path, size)
+                  if len(text) <= preferred_chars and line_width(text, font) <= max_width:
+                      return [text], font
+                  candidates = []
+                  if len(words) >= 2:
+                      for index in range(1, len(words)):
+                          line1 = " ".join(words[:index]).strip()
+                          line2 = " ".join(words[index:]).strip()
+                          width1 = line_width(line1, font)
+                          width2 = line_width(line2, font)
+                          if width1 <= max_width and width2 <= max_width:
+                              score = (
+                                  (max(0, len(line1) - preferred_chars) + max(0, len(line2) - preferred_chars)) * 10000
+                                  + abs(len(line1) - len(line2)) * 100
+                                  + abs(width1 - width2)
+                              )
+                              candidates.append((score, line1, line2))
+                  if candidates:
+                      candidates.sort(key=lambda item: item[0])
+                      _, line1, line2 = candidates[0]
+                      return [line1, line2], font
+
+              font = ImageFont.truetype(font_path, min_size)
+              if len(words) >= 2:
+                  best = None
+                  for index in range(1, len(words)):
+                      line1 = " ".join(words[:index]).strip()
+                      line2 = " ".join(words[index:]).strip()
+                      score = abs(len(line1) - len(line2))
+                      if best is None or score < best[0]:
+                          best = (score, line1, line2)
+                  if best:
+                      return [best[1], best[2]], font
+              middle = max(1, len(text) // 2)
+              return [text[:middle].strip(), text[middle:].strip()], font
+
+          os.makedirs("input", exist_ok=True)
+
+          # ----------------------------------------------------------
+          # 상단 검정 영역용 후킹 제목
+          # - 최대 2줄
+          # - 1줄 흰색 / 2줄 빨간색
+          # - 뜻 영역과 같은 명조 계열 폰트 사용
+          # ----------------------------------------------------------
+          hook_width = 1080
+          hook_height = 300
+          hook_layer = Image.new("RGBA", (hook_width, hook_height), (0, 0, 0, 0))
+          hook_draw = ImageDraw.Draw(hook_layer)
+
+          hook_lines = split_hook_lines(hook_title)
+          hook_font = fit_hook_font(
+              hook_draw,
+              hook_lines,
+              meaning_font_path,
+              max_size=104,
+              min_size=62,
+              max_width=972,
+          )
+
+          white_fill = (255, 255, 255, 255)
+          red_fill = (233, 41, 36, 255)
+          shadow_fill = (0, 0, 0, 165)
+          hook_line_gap = 4
+
+          line_metrics = []
+          total_hook_h = 0
+          for line in hook_lines:
+              _, line_h = text_size(hook_draw, line, hook_font, stroke_width=0)
+              line_metrics.append((line, line_h))
+              total_hook_h += line_h
+          total_hook_h += hook_line_gap * max(0, len(hook_lines) - 1)
+          hook_y = max(56, int((hook_height - total_hook_h) / 2) + 2)
+
+          for idx, (line, line_h) in enumerate(line_metrics):
+              line_w, _ = text_size(hook_draw, line, hook_font, stroke_width=0)
+              x = int((hook_width - line_w) / 2)
+              fill = white_fill if idx == 0 else red_fill
+              shadow = Image.new("RGBA", hook_layer.size, (0, 0, 0, 0))
+              shadow_draw = ImageDraw.Draw(shadow)
+              shadow_draw.text((x + 2, hook_y + 3), line, font=hook_font, fill=shadow_fill)
+              shadow = shadow.filter(ImageFilter.GaussianBlur(2.0))
+              hook_layer.alpha_composite(shadow)
+              hook_draw = ImageDraw.Draw(hook_layer)
+              hook_draw.text((x, hook_y), line, font=hook_font, fill=fill)
+              hook_y += line_h + hook_line_gap
+
+          hook_layer.save("input/hook_overlay.png")
+
+          # ----------------------------------------------------------
+          # 중앙 영상 영역 상단의 사자성어/한자/뜻
+          # - 사자성어와 한자를 한 줄에 나란히 배치
+          # - 두 요소를 비슷한 크기/같은 분위기의 세리프 계열로 통일
+          # - 뜻은 그 아래 1~2줄
+          # ----------------------------------------------------------
+          title_width = 1080
+          title_height = 430
+          title_layer = Image.new("RGBA", (title_width, title_height), (0, 0, 0, 0))
+          draw = ImageDraw.Draw(title_layer)
+
+          subtitle_fill = (255, 248, 234, 255)
+          subtitle_outline = (26, 18, 13, 255)
+          subtitle_shadow = (0, 0, 0, 120)
+
+          display_hanja = hanja if hanja else ""
+          idiom_font, hanja_font, title_gap, idiom_w, hanja_w, title_line_h = fit_pair_fonts(
+              draw,
+              idiom,
+              display_hanja,
+              serif_cjk_font_path,
+              serif_cjk_font_path,
+              max_size=52,
+              min_size=40,
+              gap=20,
+              max_width=820,
+              stroke_width=4,
+          )
+
+          meaning_lines, meaning_font = fit_meaning_lines(
+              draw,
+              overlay_meaning,
+              meaning_font_path,
+              max_size=34,
+              min_size=28,
+              max_width=820,
+              preferred_chars=20,
+          )
+
+          title_y = 38
+          total_title_w = idiom_w + (title_gap if display_hanja else 0) + hanja_w
+          start_x = int((title_width - total_title_w) / 2)
+          idiom_x = start_x
+          hanja_x = start_x + idiom_w + title_gap if display_hanja else start_x
+
+          title_shadow_layer = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
+          title_shadow_draw = ImageDraw.Draw(title_shadow_layer)
+          title_shadow_draw.text(
+              (idiom_x + 3, title_y + 4),
+              idiom,
+              font=idiom_font,
+              fill=subtitle_shadow,
+              stroke_width=4,
+              stroke_fill=(0, 0, 0, 95),
+          )
+          if display_hanja:
+              title_shadow_draw.text(
+                  (hanja_x + 3, title_y + 4),
+                  display_hanja,
+                  font=hanja_font,
+                  fill=subtitle_shadow,
+                  stroke_width=4,
+                  stroke_fill=(0, 0, 0, 95),
+              )
+          title_shadow_layer = title_shadow_layer.filter(ImageFilter.GaussianBlur(1.2))
+          title_layer.alpha_composite(title_shadow_layer)
+
+          draw = ImageDraw.Draw(title_layer)
+          draw.text(
+              (idiom_x, title_y),
+              idiom,
+              font=idiom_font,
+              fill=subtitle_fill,
+              stroke_width=4,
+              stroke_fill=subtitle_outline,
+          )
+          if display_hanja:
+              draw.text(
+                  (hanja_x, title_y),
+                  display_hanja,
+                  font=hanja_font,
+                  fill=subtitle_fill,
+                  stroke_width=4,
+                  stroke_fill=subtitle_outline,
+              )
+
+          # 사자성어/한자와 뜻 사이의 장식 구분선은 사용하지 않습니다.
+          # 제목 아래에 충분한 여백만 두어 더 깔끔하게 연결합니다.
+          current_y = title_y + title_line_h + 12
+          meaning_y = current_y + 5
+          meaning_line_spacing = 4
+          meaning_shadow_layer = Image.new("RGBA", title_layer.size, (0, 0, 0, 0))
+          meaning_shadow_draw = ImageDraw.Draw(meaning_shadow_layer)
+          meaning_positions = []
+          current_meaning_y = meaning_y
+
+          for meaning_line in meaning_lines:
+              box = draw.textbbox((0, 0), meaning_line, font=meaning_font, stroke_width=4)
+              meaning_w = box[2] - box[0]
+              meaning_h = box[3] - box[1]
+              meaning_x = int((title_width - meaning_w) / 2)
+              meaning_positions.append((meaning_x, current_meaning_y, meaning_line))
+              meaning_shadow_draw.text(
+                  (meaning_x + 3, current_meaning_y + 4),
+                  meaning_line,
+                  font=meaning_font,
+                  fill=subtitle_shadow,
+                  stroke_width=4,
+                  stroke_fill=(0, 0, 0, 95),
+              )
+              current_meaning_y += meaning_h + meaning_line_spacing
+
+          meaning_shadow_layer = meaning_shadow_layer.filter(ImageFilter.GaussianBlur(1.1))
+          title_layer.alpha_composite(meaning_shadow_layer)
+
+          draw = ImageDraw.Draw(title_layer)
+          for meaning_x, meaning_line_y, meaning_line in meaning_positions:
+              draw.text(
+                  (meaning_x, meaning_line_y),
+                  meaning_line,
+                  font=meaning_font,
+                  fill=subtitle_fill,
+                  stroke_width=4,
+                  stroke_fill=subtitle_outline,
+              )
+
+          title_layer.save("input/title_overlay.png")
+
+          # ----------------------------------------------------------
+          # 정보 카드
+          # ----------------------------------------------------------
+          card_width = 430
+          card_height = 152
+          canvas_padding = 18
+          radius = 18
+
+          card = Image.new(
+              "RGBA",
+              (card_width + canvas_padding, card_height + canvas_padding),
+              (0, 0, 0, 0),
+          )
+
+          card_shadow = Image.new("RGBA", card.size, (0, 0, 0, 0))
+          shadow_draw = ImageDraw.Draw(card_shadow)
+          shadow_draw.rounded_rectangle(
+              (10, 11, card_width + 6, card_height + 7),
+              radius=radius,
+              fill=(42, 31, 22, 38),
+          )
+          card_shadow = card_shadow.filter(ImageFilter.GaussianBlur(6))
+          card.alpha_composite(card_shadow)
+
+          draw = ImageDraw.Draw(card)
+          draw.rounded_rectangle(
+              (2, 2, card_width + 2, card_height + 2),
+              radius=radius,
+              fill=(247, 235, 211, 165),
+              outline=(117, 85, 52, 165),
+              width=3,
+          )
+          draw.rounded_rectangle(
+              (9, 9, card_width - 5, card_height - 5),
+              radius=max(radius - 7, 7),
+              outline=(154, 119, 79, 78),
+              width=1,
+          )
+
+          label_font = ImageFont.truetype(str(GOTHIC_FONT), 29)
+          star_font = ImageFont.truetype(str(GOTHIC_FONT), 31)
+
+          divider_x = 212
+          draw.line(
+              (divider_x, 20, divider_x, card_height - 18),
+              fill=(142, 101, 60, 155),
+              width=2,
+          )
+
+          rows = [
+              ("난이도", difficulty),
+              ("사용빈도", usage_frequency),
+              ("한국사", korean_history),
+          ]
+
+          label_x = 34
+          stars_x = 235
+          first_y = 18
+          row_gap = 40
+
+          for index, (label, rating) in enumerate(rows):
+              y = first_y + index * row_gap
+              draw.text((label_x, y), label, font=label_font, fill=(38, 29, 22, 255))
+              draw.text((stars_x, y), rating, font=star_font, fill=(25, 22, 19, 255))
+
+          card.save("input/info_card.png")
+
+          print(
+              "Polished overlays created: "
+              f"hook={hook_title}, "
+              f"title={idiom}, hanja={hanja}, "
+              f"serif_cjk_font={serif_cjk_font_path}, "
+              f"difficulty={difficulty}, "
+              f"usage_frequency={usage_frequency}, "
+              f"korean_history={korean_history}"
+          )
+          PY
+
+      - name: Generate subtitle.ass from voice_script
+        run: |
+          python - <<'PY'
+          import os
+          import re
+
+          raw_script = os.environ.get("VOICE_SCRIPT", "").strip()
+          if not raw_script:
+              raise Exception("voice_script input is empty")
+
+          with open("audio_duration.txt", "r", encoding="utf-8") as file:
+              audio_duration = float(file.read().strip())
+
+          with open("video_duration.txt", "r", encoding="utf-8") as file:
+              video_duration = float(file.read().strip())
+
+          def clean_text(text):
+              text = re.sub(r"\[\d+\s*-\s*\d+초\]", "", text)
+              text = text.replace("\r", "\n")
+              text = re.sub(r"\n{2,}", "\n", text)
+              return text.strip()
+
+          def split_sentences(text):
+              lines = [line.strip() for line in text.split("\n") if line.strip()]
+              result = []
+
+              for line in lines:
+                  parts = re.split(r"(?<=[.!?。！？])\s*", line)
+
+                  for part in parts:
+                      part = part.strip()
+                      if part:
+                          result.append(part)
+
+              return result
+
+          def split_korean_chunk(sentence, max_chars=20):
+              """
+              자막 덩어리는 공백(어절) 경계에서만 나눕니다.
+              글자 수 제한보다 단어 보존을 우선하여
+              한 단어/조사/어미를 중간에서 절대 자르지 않습니다.
+              """
+              sentence = re.sub(r"\s+", " ", sentence).strip()
+
+              if not sentence:
+                  return []
+
+              if len(sentence) <= max_chars:
+                  return [sentence]
+
+              words = sentence.split(" ")
+              chunks = []
+              current_words = []
+
+              for word in words:
+                  word = word.strip()
+                  if not word:
+                      continue
+
+                  candidate_words = current_words + [word]
+                  candidate = " ".join(candidate_words)
+
+                  if not current_words or len(candidate) <= max_chars:
+                      current_words = candidate_words
+                  else:
+                      chunks.append(" ".join(current_words))
+                      current_words = [word]
+
+              if current_words:
+                  chunks.append(" ".join(current_words))
+
+              # 매우 긴 단일 어절이 max_chars를 넘더라도
+              # 글자 중간에서 강제로 자르지 않고 그대로 유지합니다.
+              return [chunk for chunk in chunks if chunk.strip()]
+
+          def make_caption_text(chunk, max_line_chars=16):
+              """
+              화면용 1~2줄 자막도 공백(어절) 경계에서만 줄바꿈합니다.
+              양쪽 줄이 16자 이내인 분할을 우선하고,
+              불가능하면 가장 균형 좋은 어절 경계를 사용합니다.
+              공백이 없는 단일 어절은 절대 중간에서 자르지 않습니다.
+              """
+              chunk = re.sub(r"\s+", " ", chunk).strip()
+
+              if len(chunk) <= max_line_chars:
+                  return chunk
+
+              words = chunk.split(" ")
+
+              # 공백이 없는 한 단어는 길어도 그대로 표시합니다.
+              if len(words) < 2:
+                  return chunk
+
+              candidates = []
+
+              for index in range(1, len(words)):
+                  line1 = " ".join(words[:index]).strip()
+                  line2 = " ".join(words[index:]).strip()
+
+                  if not line1 or not line2:
+                      continue
+
+                  fits_both = (
+                      len(line1) <= max_line_chars
+                      and len(line2) <= max_line_chars
+                  )
+
+                  overflow = (
+                      max(0, len(line1) - max_line_chars)
+                      + max(0, len(line2) - max_line_chars)
+                  )
+
+                  balance = abs(len(line1) - len(line2))
+
+                  # 1순위: 두 줄 모두 16자 이내
+                  # 2순위: 넘치는 글자 수 최소
+                  # 3순위: 두 줄 길이 균형
+                  score = (
+                      0 if fits_both else 1,
+                      overflow,
+                      balance,
+                  )
+
+                  candidates.append((score, line1, line2))
+
+              if candidates:
+                  candidates.sort(key=lambda item: item[0])
+                  _, line1, line2 = candidates[0]
+                  return line1 + r"\N" + line2
+
+              return chunk
+
+          def ass_time(seconds):
+              seconds = max(0, float(seconds))
+              hours = int(seconds // 3600)
+              minutes = int((seconds % 3600) // 60)
+              whole_seconds = int(seconds % 60)
+              centiseconds = int(round((seconds - int(seconds)) * 100))
+
+              if centiseconds >= 100:
+                  whole_seconds += 1
+                  centiseconds = 0
+
+              return (
+                  f"{hours}:"
+                  f"{minutes:02}:"
+                  f"{whole_seconds:02}."
+                  f"{centiseconds:02}"
+              )
+
+          def escape_ass(text):
+              # ASS 줄바꿈 명령 \N은 보존하고,
+              # 일반 백슬래시만 이스케이프합니다.
+              newline_token = "__ASS_NEWLINE__"
+
+              text = text.replace(r"\N", newline_token)
+              text = text.replace("\\", r"\\")
+              text = text.replace("{", "")
+              text = text.replace("}", "")
+              text = text.replace(newline_token, r"\N")
+
+              return text
+
+          script = clean_text(raw_script)
+          sentences = split_sentences(script)
+          chunks = []
+
+          for sentence in sentences:
+              chunks.extend(split_korean_chunk(sentence, max_chars=20))
+
+          chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+
+          if not chunks:
+              raise Exception("No subtitle chunks generated")
+
+          weights = [
+              max(len(re.sub(r"\s+", "", chunk)), 4)
+              for chunk in chunks
+          ]
+
+          total_weight = sum(weights)
+          minimum_duration = 0.75
+          gap = 0.03
+          total_gap_duration = gap * (len(chunks) - 1)
+          usable_duration = max(
+              audio_duration - total_gap_duration,
+              len(chunks) * minimum_duration,
+          )
+
+          raw_durations = [
+              usable_duration * (weight / total_weight)
+              for weight in weights
+          ]
+          durations = [max(minimum_duration, duration) for duration in raw_durations]
+          calculated_total = sum(durations) + total_gap_duration
+
+          if calculated_total > audio_duration:
+              scale = audio_duration / calculated_total
+              durations = [duration * scale for duration in durations]
+
+          with open("input/subtitle.ass", "w", encoding="utf-8") as file:
+              file.write("[Script Info]\n")
+              file.write("ScriptType: v4.00+\n")
+              file.write("PlayResX: 1080\n")
+              file.write("PlayResY: 1920\n\n")
+              file.write("[V4+ Styles]\n")
+              file.write(
+                  "Format: Name, Fontname, Fontsize, PrimaryColour, "
+                  "SecondaryColour, OutlineColour, BackColour, Bold, "
+                  "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, "
+                  "Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, "
+                  "MarginR, MarginV, Encoding\n"
+              )
+              file.write(
+                  "Style: Default,NanumMyeongjo,70,&H00EAF8FF,&H000000FF,"
+                  "&H000D121A,&H70000000,1,0,0,0,100,100,-1,0,1,6,2,2,"
+                  "95,95,360,1\n\n"
+              )
+              file.write("[Events]\n")
+              file.write(
+                  "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+                  "MarginV, Effect, Text\n"
+              )
+
+              current_time = 0.0
+
+              for index, chunk in enumerate(chunks):
+                  start = current_time
+                  end = min(start + durations[index], audio_duration)
+
+                  if index == len(chunks) - 1:
+                      # 마지막 핵심 문구가 영상 종료와 동시에 잘리지 않도록
+                      # 영상의 여유 구간까지 자막을 유지합니다.
+                      end = video_duration
+
+                  if end <= start:
+                      break
+
+                  caption_text = make_caption_text(chunk)
+                  caption_text = escape_ass(caption_text)
+
+                  file.write(
+                      "Dialogue: 0,"
+                      f"{ass_time(start)},"
+                      f"{ass_time(end)},"
+                      "Default,,0,0,0,,"
+                      f"{caption_text}\n"
+                  )
+
+                  current_time = end + gap
+
+                  if current_time >= audio_duration:
+                      break
+
+          print(
+              f"subtitle.ass created: {len(chunks)} captions, "
+              f"audio_duration={audio_duration}, "
+              f"video_duration={video_duration}"
+          )
+          PY
+
+      - name: Create image clips with subtle motion and black bars
+        run: |
+          set -euo pipefail
+
+          IMAGE_COUNT=$(cat image_count.txt)
+          VIDEO_DURATION=$(cat video_duration.txt)
+          CROSSFADE_DURATION="0.40"
+          FPS="30"
+
+          # xfade 최종 길이가 VIDEO_DURATION과 정확히 맞도록
+          # 각 이미지 클립의 목표 길이를 계산합니다.
+          CLIP_DURATION=$(python - "$IMAGE_COUNT" "$VIDEO_DURATION" "$CROSSFADE_DURATION" <<'PY'
+          import sys
+
+          image_count = int(sys.argv[1])
+          video_duration = float(sys.argv[2])
+          crossfade_duration = float(sys.argv[3])
+
+          if image_count <= 0:
+              raise SystemExit("IMAGE_COUNT must be greater than zero")
+          if video_duration <= 0:
+              raise SystemExit("VIDEO_DURATION must be greater than zero")
+          if crossfade_duration < 0:
+              raise SystemExit("CROSSFADE_DURATION must not be negative")
+
+          if image_count == 1:
+              clip_duration = video_duration
+          else:
+              clip_duration = (
+                  video_duration
+                  + (image_count - 1) * crossfade_duration
+              ) / image_count
+
+          if clip_duration <= crossfade_duration:
+              raise SystemExit(
+                  "Clip duration must be longer than crossfade duration"
+              )
+
+          print(f"{clip_duration:.6f}")
+          PY
+          )
+
+          TOTAL_FRAMES=$(python - "$CLIP_DURATION" "$FPS" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+          fps = int(sys.argv[2])
+
+          print(max(2, int(round(duration * fps))))
+          PY
+          )
+
+          printf '%s' "$CLIP_DURATION" > clip_duration.txt
+          printf '%s' "$CROSSFADE_DURATION" > crossfade_duration.txt
+
+          echo "Image count: $IMAGE_COUNT"
+          echo "Target video duration: $VIDEO_DURATION"
+          echo "Clip duration: $CLIP_DURATION"
+          echo "Crossfade duration: $CROSSFADE_DURATION"
+          echo "FPS: $FPS"
+          echo "Frames per clip: $TOTAL_FRAMES"
+          echo "Layout: black 300 / video 1320 / black 300"
+
+          for i in $(seq 1 "$IMAGE_COUNT"); do
+            if [ ! -s "input/scene${i}.png" ]; then
+              echo "Missing or empty scene image: input/scene${i}.png"
+              exit 1
+            fi
+
+            # 떨림을 더 확실히 줄이기 위해 2배 이상 큰 작업 캔버스에서 모션을 만든 뒤
+            # 최종 1080x1320으로 다운스케일합니다.
+            # 이전의 trunc() 좌표 고정은 미세 떨림 대신 계단식 움직임을 만들 수 있어 제거하고,
+            # cosine easing으로 시작과 끝을 부드럽게 처리합니다.
+            case "$i" in
+              1)
+                # 중앙 줌인: 장면을 천천히 끌어당기는 기본 패턴
+                MOTION="zoompan=z='1.035+0.080*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+              2)
+                # 좌 -> 우 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)*(0.08+0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+              3)
+                # 우 -> 좌 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)*(0.84-0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)/2':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+              4)
+                # 상 -> 하 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.08+0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+              5)
+                # 중앙 줌아웃: 리듬 변화용
+                MOTION="zoompan=z='1.120-0.075*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+              6)
+                # 하 -> 상 패닝
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(0.84-0.76*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+              *)
+                # 대각선: 좌하 -> 우상. 마지막 장면에 약한 시선 이동을 줍니다.
+                MOTION="zoompan=z='1.105':x='(iw-iw/zoom)*(0.10+0.70*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':y='(ih-ih/zoom)*(0.80-0.65*(1-cos(on*PI/(${TOTAL_FRAMES}-1)))/2)':d=${TOTAL_FRAMES}:s=2160x2640:fps=${FPS}"
+                ;;
+            esac
+
+            ffmpeg -hide_banner -loglevel error -y \
+              -i "input/scene${i}.png" \
+              -vf "scale=2600:3178:force_original_aspect_ratio=increase,crop=2600:3178,${MOTION},scale=1080:1320:flags=lanczos,trim=duration=${CLIP_DURATION},setpts=PTS-STARTPTS,pad=1080:1920:0:${TOP_BLACK_HEIGHT}:black,setsar=1,fps=${FPS}" \
+              -an \
+              -c:v libx264 \
+              -preset medium \
+              -crf 20 \
+              -pix_fmt yuv420p \
+              -movflags +faststart \
+              "clips/clip${i}.mp4"
+
+            if [ ! -s "clips/clip${i}.mp4" ]; then
+              echo "Failed to create clip: clips/clip${i}.mp4"
+              exit 1
+            fi
+
+            ACTUAL_CLIP_DURATION=$(ffprobe \
+              -v error \
+              -show_entries format=duration \
+              -of default=noprint_wrappers=1:nokey=1 \
+              "clips/clip${i}.mp4")
+
+            python - "$i" "$CLIP_DURATION" "$ACTUAL_CLIP_DURATION" <<'PY'
+          import sys
+
+          scene_index = int(sys.argv[1])
+          expected = float(sys.argv[2])
+          actual = float(sys.argv[3])
+          tolerance = 0.12
+
+          if abs(expected - actual) > tolerance:
+              raise SystemExit(
+                  f"Clip {scene_index} duration mismatch: "
+                  f"expected {expected:.3f}s, got {actual:.3f}s"
+              )
+
+          print(
+              f"Validated clip {scene_index}: "
+              f"{actual:.3f}s (target {expected:.3f}s)"
+          )
+          PY
+          done
+
+      - name: Create smooth crossfade scene video
+        run: |
+          set -euo pipefail
+
+          IMAGE_COUNT=$(cat image_count.txt)
+          VIDEO_DURATION=$(cat video_duration.txt)
+          CLIP_DURATION=$(cat clip_duration.txt)
+          CROSSFADE_DURATION=$(cat crossfade_duration.txt)
+
+          if [ "$IMAGE_COUNT" -eq 1 ]; then
+            cp clips/clip1.mp4 input/scenes_xfade.mp4
+          else
+            INPUT_ARGS=()
+
+            for i in $(seq 1 "$IMAGE_COUNT"); do
+              INPUT_ARGS+=(-i "clips/clip${i}.mp4")
+            done
+
+            FILTER_COMPLEX=$(python - "$IMAGE_COUNT" "$CLIP_DURATION" "$CROSSFADE_DURATION" <<'PY'
+          import sys
+
+          image_count = int(sys.argv[1])
+          clip_duration = float(sys.argv[2])
+          fade_duration = float(sys.argv[3])
+
+          filters = []
+
+          # xfade 직전 모든 입력을 동일한 fps/timebase/0-base PTS로 정규화합니다.
+          for index in range(image_count):
+              filters.append(
+                  f"[{index}:v]"
+                  f"fps=30,"
+                  f"settb=AVTB,"
+                  f"setpts=PTS-STARTPTS"
+                  f"[in{index}]"
+              )
+
+          previous = "[in0]"
+
+          for index in range(1, image_count):
+              offset = index * (clip_duration - fade_duration)
+              output_label = (
+                  "[vxfade]"
+                  if index == image_count - 1
+                  else f"[xf{index}]"
+              )
+
+              filters.append(
+                  f"{previous}[in{index}]"
+                  f"xfade=transition=fade:"
+                  f"duration={fade_duration:.6f}:"
+                  f"offset={offset:.6f}"
+                  f"{output_label}"
+              )
+
+              previous = output_label
+
+          print(";".join(filters))
+          PY
+            )
+
+            echo "Crossfade filter:"
+            echo "$FILTER_COMPLEX"
+
+            ffmpeg -hide_banner -loglevel error -y \
+              "${INPUT_ARGS[@]}" \
+              -filter_complex "$FILTER_COMPLEX" \
+              -map "[vxfade]" \
+              -t "$VIDEO_DURATION" \
+              -r 30 \
+              -an \
+              -c:v libx264 \
+              -preset medium \
+              -crf 20 \
+              -pix_fmt yuv420p \
+              input/scenes_xfade.mp4
+          fi
+
+          if [ ! -s input/scenes_xfade.mp4 ]; then
+            echo "Crossfade scene video was not created."
+            exit 1
+          fi
+
+          XFADE_DURATION=$(ffprobe \
+            -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            input/scenes_xfade.mp4)
+
+          python - "$VIDEO_DURATION" "$XFADE_DURATION" <<'PY'
+          import sys
+
+          expected = float(sys.argv[1])
+          actual = float(sys.argv[2])
+
+          if abs(expected - actual) > 0.25:
+              raise SystemExit(
+                  f"Crossfade duration mismatch: "
+                  f"expected {expected:.3f}s, got {actual:.3f}s"
+              )
+
+          print(
+              f"Validated crossfade scene duration: "
+              f"{actual:.3f}s (target {expected:.3f}s)"
+          )
+          PY
+
+      - name: Add overlays TTS and BGM
+        run: |
+          set -euo pipefail
+
+          OUTPUT_VIDEO="output/short_${JOB_ID}.mp4"
+          AUDIO_PATH=$(cat audio_path.txt)
+          AUDIO_DURATION=$(cat audio_duration.txt)
+          VIDEO_DURATION=$(cat video_duration.txt)
+
+          if [ -z "$AUDIO_PATH" ] || [ ! -s "$AUDIO_PATH" ]; then
+            echo "Prepared audio path is missing or empty: $AUDIO_PATH"
+            exit 1
+          fi
+
+          FADE_OUT_DURATION=$(python - "$VIDEO_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+          print(min(2.0, max(duration, 0.0)))
+          PY
+          )
+
+          FADE_OUT_START=$(python - "$VIDEO_DURATION" "$FADE_OUT_DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+          fade_duration = float(sys.argv[2])
+          print(max(duration - fade_duration, 0.0))
+          PY
+          )
+
+          echo "Narration duration: $AUDIO_DURATION"
+          echo "Final video duration: $VIDEO_DURATION"
+          echo "Scene transition: dissolve/crossfade 0.40s"
+          echo "Motion profile: enhanced Ken Burns - zoom / horizontal / vertical / diagonal with anti-shake stabilization"
+          echo "Top black area: ${TOP_BLACK_HEIGHT}px"
+          echo "Video area: ${VIDEO_AREA_HEIGHT}px"
+          echo "Bottom black area: ${BOTTOM_BLACK_HEIGHT}px"
+          echo "Title overlay Y: $TITLE_OVERLAY_Y"
+          echo "Info card Y: $INFO_CARD_Y"
+          echo "BGM fade-out start: $FADE_OUT_START"
+          echo "BGM fade-out duration: $FADE_OUT_DURATION"
+          echo "BGM volume: 0.07"
+          echo "Voice processing: clean Chirp source / 48kHz resample only / no EQ / no de-esser / no loudness processing"
+
+          ffmpeg -hide_banner -loglevel error -y \
+            -i input/scenes_xfade.mp4 \
+            -i "$AUDIO_PATH" \
+            -stream_loop -1 \
+            -i assets/bgm.mp3 \
+            -loop 1 \
+            -i input/hook_overlay.png \
+            -loop 1 \
+            -i input/title_overlay.png \
+            -loop 1 \
+            -i input/info_card.png \
+            -filter_complex "\
+              [0:v:0][3:v:0]overlay=0:0:format=auto[hooked];\
+              [hooked][4:v:0]overlay=0:${TITLE_OVERLAY_Y}:format=auto[titled];\
+              [titled][5:v:0]overlay=(main_w-overlay_w)/2:${INFO_CARD_Y}:format=auto[carded];\
+              [carded]ass=input/subtitle.ass:fontsdir=fonts[vout];\
+              [1:a:0]aresample=48000:async=1:first_pts=0,\
+              apad=pad_dur=${END_PADDING_SECONDS}[voice];\
+              [2:a:0]atrim=0:${VIDEO_DURATION},asetpts=PTS-STARTPTS,\
+              aresample=48000:async=1:first_pts=0,volume=0.07,\
+              afade=t=in:st=0:d=1,\
+              afade=t=out:st=${FADE_OUT_START}:d=${FADE_OUT_DURATION}[bgm];\
+              [voice][bgm]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,\
+              alimiter=limit=0.95[aout]" \
+            -map "[vout]" \
             -map "[aout]" \
             -t "$VIDEO_DURATION" \
             -c:v libx264 \
@@ -126,3 +1662,4 @@
           fi
 
           echo "GitHub Release upload completed successfully."
+          gh release view "$TAG" --json url --jq '.url'
